@@ -178,6 +178,16 @@ class CoreWorkflowAdapter:
                     if self._known_label(raw) is not None
                     else ""
                 ),
+                "expanded_normal": (
+                    "Normal"
+                    if "".join(char for char in raw.casefold() if char.isalnum())
+                    in {"pass", "noactive", "none", "nogateeffect"}
+                    else "Open"
+                    if "".join(char for char in raw.casefold() if char.isalnum()) == "open"
+                    else "Short"
+                    if "".join(char for char in raw.casefold() if char.isalnum()) == "short"
+                    else ""
+                ),
             }
             for raw in raw_statuses
         ]
@@ -185,7 +195,9 @@ class CoreWorkflowAdapter:
             "summary": (
                 f"측정 {len(measurements.sheets)}개 샘플, "
                 f"예측 {len(predictions.sheets)}개 샘플을 확인했습니다. "
-                "원본 행 전체를 표에 표시하지 않고 시트 연결과 라벨만 검토합니다."
+                "원본 행 전체를 표에 표시하지 않고 시트 연결과 라벨만 검토합니다. "
+                "확장 Normal은 No Gate Effect를 Normal로 보는 추가 관찰 가정이며 "
+                "원본/기본 결과를 보존합니다."
             ),
             "measurement": {"sheet_candidates": measurement_names},
             "prediction": {"sheet_candidates": prediction_names},
@@ -226,6 +238,9 @@ class CoreWorkflowAdapter:
             raise RuntimeError("확인된 측정·예측 시트 연결이 없습니다.")
         rules = {rule["raw_status"]: rule["class"] for rule in context.label_rules}
         binary_rules = {rule["raw_status"]: rule["binary"] for rule in context.label_rules}
+        expanded_rules = {
+            rule["raw_status"]: rule["expanded_normal"] for rule in context.label_rules
+        }
         context.progress(12, "선택한 규칙으로 평가 지표를 계산하는 중…")
         evaluation = core.evaluate(
             self._measurements,
@@ -233,6 +248,7 @@ class CoreWorkflowAdapter:
             approved,
             status_rules=rules,
             binary_status_rules=binary_rules,
+            expanded_normal_status_rules=expanded_rules,
         )
         if evaluation.blocked:
             details = ", ".join(
@@ -429,8 +445,10 @@ class MainWindow(QMainWindow):
 
         label_box = QGroupBox("4. 라벨 규칙 확인")
         label_layout = QVBoxLayout(label_box)
-        self.label_table = QTableWidget(0, 3)
-        self.label_table.setHorizontalHeaderLabels(("원본 상태", "3-클래스", "이진 판정"))
+        self.label_table = QTableWidget(0, 4)
+        self.label_table.setHorizontalHeaderLabels(
+            ("원본 상태", "3-클래스", "이진 판정", "확장 Normal")
+        )
         self.label_table.setAccessibleName("라벨 규칙 표")
         self.label_table.setAlternatingRowColors(True)
         self.label_table.horizontalHeader().setStretchLastSection(True)
@@ -836,6 +854,13 @@ class MainWindow(QMainWindow):
             binary_combo.setAccessibleName(f"{raw} 이진 판정 라벨")
             binary_combo.currentTextChanged.connect(self._refresh_generate_state)
             self.label_table.setCellWidget(index, 2, binary_combo)
+            expanded_combo = QComboBox()
+            expanded_combo.addItems(["선택 필요", *LABEL_CHOICES])
+            expanded = str(row.get("expanded_normal") or "")
+            expanded_combo.setCurrentText(expanded if expanded in LABEL_CHOICES else "선택 필요")
+            expanded_combo.setAccessibleName(f"{raw} 확장 Normal 판정 라벨")
+            expanded_combo.currentTextChanged.connect(self._refresh_generate_state)
+            self.label_table.setCellWidget(index, 3, expanded_combo)
         self.label_table.resizeColumnsToContents()
 
     def _current_mappings(self) -> list[dict[str, Any]]:
@@ -851,6 +876,7 @@ class MainWindow(QMainWindow):
             item = self.label_table.item(index, 0)
             class_combo = self.label_table.cellWidget(index, 1)
             binary_combo = self.label_table.cellWidget(index, 2)
+            expanded_combo = self.label_table.cellWidget(index, 3)
             rules.append(
                 {
                     "raw_status": item.text() if item else "",
@@ -859,6 +885,9 @@ class MainWindow(QMainWindow):
                     else "",
                     "binary": binary_combo.currentText()
                     if isinstance(binary_combo, QComboBox)
+                    else "",
+                    "expanded_normal": expanded_combo.currentText()
+                    if isinstance(expanded_combo, QComboBox)
                     else "",
                 }
             )
@@ -873,7 +902,9 @@ class MainWindow(QMainWindow):
         unresolved = [
             rule["raw_status"]
             for rule in rules
-            if rule["class"] == "선택 필요" or rule["binary"] == "선택 필요"
+            if rule["class"] == "선택 필요"
+            or rule["binary"] == "선택 필요"
+            or rule["expanded_normal"] == "선택 필요"
         ]
         self._unresolved_labels = unresolved
         pending = bool(unresolved)

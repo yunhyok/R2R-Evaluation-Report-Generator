@@ -63,3 +63,6 @@ Every generated workbook records input absolute paths, SHA-256, size, modificati
 worksheet, confirmed sample mapping, raw-to-canonical rules, and raw-to-binary rules. `Joined_Data`
 stores only evaluation fields and source row identifiers; wide measurement sweep columns remain in
 the hashed source file rather than being copied into the report.
+Expanded Normal is an additional image-observability/reporting assumption, not relabeling of the
+electrical ground truth. It maps No Gate Effect to Normal and keeps Short as Short; source and
+existing three-class/binary results remain authoritative.

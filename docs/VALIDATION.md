@@ -1,6 +1,6 @@
-# Validation record — v0.1.0-rc.1
+# Validation record — v0.2.0-rc.1
 
-Validation date: 2026-08-07 (Asia/Seoul).
+Validation date: 2026-08-11 (Asia/Seoul).
 Platform: Windows 11 `10.0.26200`, Python `3.12.13`, PySide6/Qt `6.11.1`,
 openpyxl `3.1.5`, PyInstaller `6.21.0`, Inno Setup `6.7.3`.
 
@@ -8,10 +8,10 @@ openpyxl `3.1.5`, PyInstaller `6.21.0`, Inno Setup `6.7.3`.
 
 - `python -m ruff check .`: passed.
 - `python -m pytest`: **36 passed**.
-- Source self-test: `R2R_EVALUATION_REPORT_SELF_TEST_OK`, deterministic workbook reopened.
-- Frozen executable self-test: passed.
-- Source-only guard is rerun after staging; repository rules reject CSV/XLS/XLSX/EXE/MSI/model files
-  and build/dist/runs paths.
+- Source self-test: `R2R_EVALUATION_REPORT_SELF_TEST_OK version=0.2.0`, deterministic workbook reopened.
+- Frozen executable self-test and GUI smoke: passed.
+- Source-only guard: `SOURCE_ONLY_GUARD_OK tracked_files=30`.
+- Packaging contract: **4 passed**.
 - Runtime dependency contract: exactly `PySide6==6.11.1`, `openpyxl==3.1.5`; pandas, NumPy and
   Torch are not runtime dependencies.
 
@@ -34,42 +34,47 @@ Inputs remain outside the repository.
 - Accuracy `54.0789%`; balanced accuracy `50.7837%`; Fail recall `4.9291%`;
   Fail F1 `9.0599%`; macro-F1 `39.1722%`; weighted-F1 `41.3361%`.
 - Measurement/prediction pass rate: `53.5931% / 95.9109%`.
+- Expanded Normal scenario, rows Actual Normal/Open/Short and columns Predicted Normal/Open/Short:
+  `[[9476, 202, 202], [0, 0, 0], [0, 0, 0]]`; total `9,880`.
+- Expanded Normal recall `95.9109%`, Normal F1 `97.9128%`; strict macro-F1 `N/A`.
+- Existing mapped 3-class and Fail-positive binary values are unchanged.
 
 Authoritative acceptance workbook:
-`validation/R2R-Evaluation-Acceptance-20260807.xlsx`, 998,576 bytes,
-SHA-256 `014C97CAB6E9D0DBF8484DC685BA281B405FB8A10B27E989EAF76AAC0118B082`.
+`validation/R2R-Evaluation-Acceptance-20260810.xlsx`, 1,146,026 bytes,
+SHA-256 `62C92726CBFE5EA10B31DC91AAFCAEE5AD21252DA83358DEC2C9C9DD8752087F`.
 
 ## Workbook and Excel visual QA
 
 - Reopen/structural verifier passed with sheet order
   `README, Mapping_Audit, Joined_Data, R01…R10, Overall Summary` (14 sheets).
-- Every report body contains exactly 988 nonblank cells in all three maps.
-- `C:AO` width `2.5`; map rows height `17 pt`; print area `A1:BM107`.
+- Each report uses print area `A1:BM142`, row breaks `[39, 74, 109]`, and exactly four A3 landscape
+  pages; Overall Summary is exactly three A3 landscape pages.
+- Microsoft Excel PDF export confirmed these exact page counts. All ten Expanded Normal report pages
+  and the summary scenario page were raster/visual checked; representative R01, R10 and summary
+  workbooks showed no overlap or clipping.
 - Excel-native charts have verified source formulas; each report has two charts and the summary one.
-- Microsoft Excel PDF export: each `R01…R10` is exactly three A3 landscape pages;
-  `Overall Summary` is two logical A3 pages.
-- All 30 report pages plus both summary pages were rasterized and visually checked for map, legend,
-  matrix, chart and text overlap. An initial two-page report pagination and seven-page fragmented
-  summary were corrected before release.
 
 ## UI/UX and packaged/installed execution
 
 - Source UI preflight used the two representative real files without loading 9,880 raw rows into a
-  GUI table. Top/bottom captures were checked at logical scale factors `1`, `1.25`, and `1.5`;
-  a native Windows render at system 150% verified Korean glyphs, long `V:`/OneDrive paths and scroll.
-- Source and frozen GUI smoke passed at `100%`, `125%`, and `150%`.
+  GUI table. Captures passed at effective DPR `1.0`, `1.25`, and `1.5` (host native 150%; Qt factors
+  `0.6666667`, `0.8333333`, `1`). The fourth label-mapping column was visible and generation enabled.
+- Source and frozen GUI smoke passed at effective `100%`, `125%`, and `150%`; frozen actual UI workflow passed.
 - Frozen executable Windows UI Automation completed: set both real inputs and output, preflight,
   explicitly confirm all ten proposals, generate, expose open-output controls, close.
   Generated workbook reopened with all 14 sheets and authoritative KPI values.
-- Installed disposable build completed the same real-data UI workflow and generated a separately
-  verified workbook before clean uninstall.
+- Installed disposable lifecycle and actual UI workflow passed at effective `100%`, `125%`, and `150%`,
+  including clean uninstall.
+- Direct, packaged, and installed generated workbooks all passed the verifier and had the same Expanded
+  Normal matrix and print breaks.
 - Overwrite ownership, disabled controls while working, cancellation, error recovery and output-open
   visibility are covered by GUI/unit integration tests.
 
 ## Installer lifecycle and artifacts
 
-Disposable AppId `{2E42973D-7A33-4CF3-91FD-7A4C62ACCC4F}` was validated independently at each scale
-factor `1`, `1.25`, and `1.5`:
+Disposable AppId `{2E42973D-7A33-4CF3-91FD-7A4C62ACCC4F}` was validated independently at each
+effective scale `100%`, `125%`, and `150%` (Qt factors `0.6666667`, `0.8333333`, and `1` on the
+host-native 150% display):
 
 `fresh install → installed self-test → synthetic export → GUI smoke → same-installer upgrade →
 post-upgrade self-test → uninstall → executable/registry/residual check`
@@ -78,9 +83,9 @@ All three runs emitted `INSTALLER_LIFECYCLE_OK`.
 
 | Artifact | Bytes | SHA-256 |
 |---|---:|---|
-| Frozen EXE | 60,310,166 | `4F2C3BF027F66DD93AB86473FB8B899F0BE90B30070ECE43A6A6971C28218DB3` |
-| Production installer | 61,558,575 | `D9A470B125599FC88A1509476AF50D5AA5332ACE02916A740B07ABB2FE8DA732` |
-| Disposable installer | 61,558,594 | `65E9736F75D9F7D97C47BCCDB8E0675F72571C123C3E090EBD82E633DD0CAC28` |
+| Frozen EXE | 60,315,655 | `F3D7AD820C4F8FEF95FE225819E7EE7465F68CDF291D534DD78A0D361978026B` |
+| Production installer | 61,564,988 | `009EE3CFEB91AD6C25BA01FE1447C759EE0F5A3E8DC3584DE63B650677ABF32B` |
+| Disposable installer | 61,565,005 | `CF5A6B3998D8AE8677A9DC12D99B480C0E6DCAF63EAE6E5D9C5B45042E4F1ECA` |
 
 The production installer is unsigned. A possible Windows SmartScreen reputation warning is a code
 signing/reputation condition and is recorded separately from the completed functional validation.

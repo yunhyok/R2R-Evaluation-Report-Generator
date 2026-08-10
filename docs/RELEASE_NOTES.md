@@ -1,3 +1,10 @@
+# v0.2.0-rc.1
+
+- Added auditable Expanded Normal scenario analysis, mapping No Gate Effect to Normal while keeping Short separate.
+- Preserved raw, mapped 3-class, and Fail-positive binary outputs; added scenario maps, metrics, and audit fields.
+- Validation completed 2026-08-11 across source, frozen, packaged, and installed workflows; see
+  `docs/VALIDATION.md` for acceptance workbook hashes, matrix evidence, page counts, and artifact checksums.
+
 # v0.1.0-rc.1
 
 Initial private release candidate of R2R Evaluation Report Generator.

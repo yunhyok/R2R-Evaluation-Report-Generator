@@ -130,6 +130,8 @@ def test_core_result_sources_profile_order_and_joined_contract(
     assert readme.cell(no_gate.row, 2).value == "Exclude"
     assert readme.cell(no_gate.row, 3).value == "Fail"
     assert "missing pair" in readme["B4"].value
+    profile_header = _find_value(readme, "Expanded Normal scenario")
+    assert profile_header.fill.fgColor.rgb[-6:] == "1F4E78"
 
     audit = wb["Mapping_Audit"]
     long_name = evaluation.sheet_evaluations[1].measurement_sheet
@@ -137,17 +139,21 @@ def test_core_result_sources_profile_order_and_joined_contract(
     assert _find_value(audit, "exact").value == "exact"
 
     joined = wb["Joined_Data"]
-    assert tuple(joined.cell(3, col).value for col in range(1, 14)) == JOINED_HEADERS
-    assert joined.max_column == 13
+    assert (
+        tuple(joined.cell(3, col).value for col in range(1, len(JOINED_HEADERS) + 1))
+        == JOINED_HEADERS
+    )
+    assert joined.max_column == 16
     assert joined.max_row == 3 + 2 * 26 * 38
     assert joined.freeze_panes == "A4"
-    assert joined.auto_filter.ref == f"A3:M{joined.max_row}"
+    assert joined.auto_filter.ref == f"A3:P{joined.max_row}"
     assert joined["D9"].value == "No Gate Effect"
     assert joined["E9"].value == "Exclude"
     assert joined["J9"].value == "Fail"
     assert joined["K9"].value == "Pass"
     assert joined["L9"].value == "FN"
     assert joined["M9"].value == 7
+    assert joined["N9"].value == "Normal"
     wb.close()
 
 
@@ -199,18 +205,20 @@ def test_report_all_grid_cells_colors_page_bands_metrics_and_charts(
     assert report["AZ4"].value == "Measurement legend"
     assert report["AZ43"].value == "Prediction legend"
     assert report["BH76"].value == "Agreement legend"
+    assert report["AW113"].value == "Class"
+    assert report["BH113"].value == "Expanded Normal legend"
     assert report["AQ101"].value.startswith("Definitions: Fail is the positive")
-    assert report.max_row == 107 and report.max_column == 65
+    assert report.max_row == 142 and report.max_column == 65
 
     assert report.column_dimensions["C"].width == 2.5
     assert report.column_dimensions["AO"].width == 2.5
-    for heading, body in ((8, 9), (43, 44), (78, 79)):
+    for heading, body in ((8, 9), (43, 44), (78, 79), (113, 114)):
         assert all(report.row_dimensions[row].height == 17 for row in range(heading, body + 26))
-    assert report.print_area == "'R01'!$A$1:$BM$107"
+    assert report.print_area == "'R01'!$A$1:$BM$142"
     assert report.page_setup.orientation == "landscape"
     assert str(report.page_setup.paperSize) == str(report.PAPERSIZE_A3)
     assert report.page_setup.fitToWidth == 1 and report.page_setup.fitToHeight == 0
-    assert [item.id for item in report.row_breaks.brk] == [39, 74]
+    assert [item.id for item in report.row_breaks.brk] == [39, 74, 109]
 
     raw = sample.raw_status_by_prediction
     assert report["AQ76"].value == "Raw status x prediction"
@@ -288,7 +296,10 @@ def test_overall_summary_uses_authoritative_metrics_and_has_no_overlap(
     assert str(summary.page_setup.paperSize) == str(summary.PAPERSIZE_A3)
     assert summary.page_setup.fitToWidth == 1 and summary.page_setup.fitToHeight == 0
     assert str(summary.print_area).startswith("'Overall Summary'!$A$1:$Q$")
-    assert [item.id for item in summary.row_breaks.brk] == [section_row - 1]
+    scenario_title = _find_value(summary, "Expanded Normal scenario — per-sample KPI")
+    assert [item.id for item in summary.row_breaks.brk] == [section_row - 1, scenario_title.row - 1]
+    assert scenario_title.column == 1
+    assert _find_value(summary, "Overall Expanded Normal scenario 3x3").column == 1
     wb.close()
 
 
@@ -315,6 +326,7 @@ def test_custom_status_profile_drives_joined_canonical_and_binary(tmp_path):
         ),
         status_rules={"Custom Ink Gap": "Open"},
         binary_status_rules={"Custom Ink Gap": "Fail"},
+        expanded_normal_status_rules={"Custom Ink Gap": "Open"},
     )
     assert not evaluation.blocked
     output = generate_workbook(tmp_path / "custom.xlsx", evaluation)

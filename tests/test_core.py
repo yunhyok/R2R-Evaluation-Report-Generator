@@ -190,7 +190,7 @@ def test_evaluation_blocks_unmatched_measurement_sample(tmp_path: Path) -> None:
     assert "SAM 11" in result.mapping_errors[0]
 
 
-def test_nondefault_status_needs_both_three_class_and_binary_rules(tmp_path: Path) -> None:
+def test_nondefault_status_needs_all_three_profile_rules(tmp_path: Path) -> None:
     measurement_rows = _grid_rows("Status", lambda _r, _n: "Review")
     prediction_rows = _grid_rows("prediction", lambda _r, _n: "Normal")
     measurement_path = tmp_path / "measurement.csv"
@@ -208,7 +208,17 @@ def test_nondefault_status_needs_both_three_class_and_binary_rules(tmp_path: Pat
         status_rules={"Review": "Normal"},
         binary_status_rules={"Review": "Fail"},
     )
-    assert not both_rules.blocked
+    assert both_rules.blocked
+    all_rules = core.evaluate(
+        measured,
+        predicted,
+        status_rules={"Review": "Normal"},
+        binary_status_rules={"Review": "Fail"},
+        expanded_normal_status_rules={"Review": "Normal"},
+    )
+    assert not all_rules.blocked
+    assert all_rules.overall_expanded_normal is not None
+    assert all_rules.overall_expanded_normal.matrix == ((988, 0, 0), (0, 0, 0), (0, 0, 0))
 
 
 def test_token_signature_normalises_yy_dates_sam_and_kg_but_requires_confirmation() -> None:

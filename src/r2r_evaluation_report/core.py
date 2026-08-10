@@ -14,7 +14,7 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from statistics import fmean
@@ -77,6 +77,14 @@ _DEFAULT_BINARY_STATUS_RULES = {
     "open": "Fail",
     "short": "Fail",
     "nogateeffect": "Fail",
+}
+_DEFAULT_EXPANDED_NORMAL_STATUS_RULES = {
+    "pass": "Normal",
+    "noactive": "Normal",
+    "none": "Normal",
+    "open": "Open",
+    "short": "Short",
+    "nogateeffect": "Normal",
 }
 _PREDICTION_CLASSES = {_normalise(label): label for label in TARGET_CLASSES}
 
@@ -230,12 +238,14 @@ class SheetEvaluation:
     operational_binary: Metrics | None
     confidence_review: ConfidenceReviewStats
     yield_stats: YieldStats | None = None
+    expanded_normal: Metrics | None = None
 
 
 @dataclass(frozen=True)
 class StatusMappingProfile:
     three_class: Mapping[str, str]
     binary: Mapping[str, str]
+    expanded_normal: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -252,6 +262,7 @@ class EvaluationResult:
     status_mapping: StatusMappingProfile | None = None
     overall_yield: YieldStats | None = None
     mapping_errors: tuple[str, ...] = ()
+    overall_expanded_normal: Metrics | None = None
 
 
 def _source_metadata(
@@ -888,12 +899,14 @@ def evaluate(
     *,
     status_rules: Mapping[str, str] | None = None,
     binary_status_rules: Mapping[str, str] | None = None,
+    expanded_normal_status_rules: Mapping[str, str] | None = None,
 ) -> EvaluationResult:
     """Evaluate approved mappings without silently scoring unknown labels.
 
     Unknown measurement statuses and predictions are reported in the result and
     make it ``blocked``.  A non-default measurement status needs explicit
-    three-class and binary rules; prediction labels are fixed to Normal/Open/Short.
+    three-class, binary, and Expanded Normal rules; prediction labels are fixed to
+    Normal/Open/Short.
     """
     audit = preflight(measurements, predictions)
     approved = (
@@ -905,6 +918,7 @@ def evaluate(
     prediction_by_title = {sheet.title: sheet for sheet in predictions.sheets}
     rules = dict(_DEFAULT_STATUS_RULES)
     binary_rules = dict(_DEFAULT_BINARY_STATUS_RULES)
+    expanded_rules = dict(_DEFAULT_EXPANDED_NORMAL_STATUS_RULES)
     if status_rules:
         allowed_targets = {_normalise(value): value for value in (*TARGET_CLASSES, "Exclude")}
         resolved_rules: dict[str, str] = {}
@@ -924,7 +938,18 @@ def evaluate(
                 raise DataContractError("binary status rule targets must be Pass or Fail")
             resolved_binary_rules[_normalise(key)] = target
         binary_rules.update(resolved_binary_rules)
-    profile = StatusMappingProfile(dict(rules), dict(binary_rules))
+    if expanded_normal_status_rules:
+        allowed_targets = {_normalise(value): value for value in (*TARGET_CLASSES, "Exclude")}
+        resolved_expanded_rules: dict[str, str] = {}
+        for key, value in expanded_normal_status_rules.items():
+            target = allowed_targets.get(_normalise(value))
+            if target is None:
+                raise DataContractError(
+                    "expanded-normal status rule targets must be Normal, Open, Short, or Exclude"
+                )
+            resolved_expanded_rules[_normalise(key)] = target
+        expanded_rules.update(resolved_expanded_rules)
+    profile = StatusMappingProfile(dict(rules), dict(binary_rules), dict(expanded_rules))
     joined_by_sheet: list[tuple[MappingProposal, tuple[JoinedRecord, ...]]] = []
     # Validate selected sources before pair-specific scoring.  This prevents an
     # unknown label from being hidden simply because its sheet is unmatched.
@@ -935,6 +960,7 @@ def evaluate(
         if (
             _mapping_for(record.value, rules) is None
             or _mapping_for(record.value, binary_rules) is None
+            or _mapping_for(record.value, expanded_rules) is None
         )
     }
     unknown_predictions = {
@@ -989,23 +1015,30 @@ def evaluate(
     evaluations: list[SheetEvaluation] = []
     all_three: list[tuple[str, str]] = []
     all_binary: list[tuple[str, str]] = []
+    all_expanded: list[tuple[str, str]] = []
     all_complete: list[JoinedRecord] = []
     for proposal, joined in joined_by_sheet:
         included: list[JoinedRecord] = []
         excluded: list[JoinedRecord] = []
         three: list[tuple[str, str]] = []
         binary: list[tuple[str, str]] = []
+        expanded: list[tuple[str, str]] = []
         for item in joined:
             if not item.measurement or not item.prediction:
                 excluded.append(item)
                 continue
             mapped = _mapping_for(item.measurement.value, rules)
             binary_actual = _mapping_for(item.measurement.value, binary_rules)
+            expanded_actual = _mapping_for(item.measurement.value, expanded_rules)
             assert mapped is not None
             assert binary_actual is not None
+            assert expanded_actual is not None
             predicted = _PREDICTION_CLASSES[_normalise(item.prediction.value)]
             binary.append((binary_actual, "Pass" if predicted == "Normal" else "Fail"))
             all_complete.append(item)
+            if expanded_actual != "Exclude":
+                expanded.append((expanded_actual, predicted))
+                all_expanded.append((expanded_actual, predicted))
             if mapped == "Exclude":
                 excluded.append(item)
                 continue
@@ -1024,20 +1057,22 @@ def evaluate(
                 _metrics(("Pass", "Fail"), binary),
                 _confidence_stats(joined),
                 _yield_stats(joined),
+                _metrics(TARGET_CLASSES, expanded, strict_macro=True),
             )
         )
     return EvaluationResult(
-        False,
-        (),
-        (),
-        final_audit,
-        tuple(evaluations),
-        _metrics(TARGET_CLASSES, all_three, strict_macro=True),
-        _metrics(("Pass", "Fail"), all_binary),
-        tuple(sheet.source for sheet in measurements.sheets),
-        tuple(sheet.source for sheet in predictions.sheets),
-        profile,
-        _yield_stats(all_complete),
+        blocked=False,
+        unresolved_measurement_statuses=(),
+        unknown_predictions=(),
+        mappings=final_audit,
+        sheet_evaluations=tuple(evaluations),
+        overall_three_class=_metrics(TARGET_CLASSES, all_three, strict_macro=True),
+        overall_binary=_metrics(("Pass", "Fail"), all_binary),
+        measurement_sources=tuple(sheet.source for sheet in measurements.sheets),
+        prediction_sources=tuple(sheet.source for sheet in predictions.sheets),
+        status_mapping=profile,
+        overall_yield=_yield_stats(all_complete),
+        overall_expanded_normal=_metrics(TARGET_CLASSES, all_expanded, strict_macro=True),
     )
 
 

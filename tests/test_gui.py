@@ -121,8 +121,11 @@ def test_mapping_confirmation_and_unresolved_label_block_generation(qtbot, tmp_p
 
     unresolved_combo = window.label_table.cellWidget(1, 1)
     binary_combo = window.label_table.cellWidget(1, 2)
+    expanded_combo = window.label_table.cellWidget(1, 3)
+    window.label_table.cellWidget(0, 3).setCurrentText("Normal")
     unresolved_combo.setCurrentText("Open")
     binary_combo.setCurrentText("Fail")
+    expanded_combo.setCurrentText("Open")
     assert window.generate_button.isEnabled()
 
 
@@ -133,7 +136,9 @@ def test_working_controls_cancel_and_success_state(qtbot, tmp_path: Path) -> Non
     window.show()
     _, _, output = _fill_paths(window, tmp_path)
     window._set_mappings([{"measurement": "측정", "prediction": "예측", "method": "명시적"}])
-    window._set_label_rules([{"raw_status": "OK", "class": "Normal", "binary": "Pass"}])
+    window._set_label_rules(
+        [{"raw_status": "OK", "class": "Normal", "binary": "Pass", "expanded_normal": "Normal"}]
+    )
     window._refresh_generate_state()
 
     window.start_generation()
@@ -175,7 +180,14 @@ def test_unmatched_measurement_sample_blocks_generation(qtbot, tmp_path: Path) -
                     "method": "정확",
                 }
             ],
-            "label_rules": [{"raw_status": "Pass", "class": "Normal", "binary": "Pass"}],
+            "label_rules": [
+                {
+                    "raw_status": "Pass",
+                    "class": "Normal",
+                    "binary": "Pass",
+                    "expanded_normal": "Normal",
+                }
+            ],
             "unmatched_measurement_sheets": ["측정 2"],
         }
     )
@@ -189,7 +201,9 @@ def test_generation_failure_shows_actionable_error(qtbot, tmp_path: Path) -> Non
     qtbot.addWidget(window)
     _fill_paths(window, tmp_path)
     window._set_mappings([{"measurement": "측정", "prediction": "예측", "method": "명시적"}])
-    window._set_label_rules([{"raw_status": "OK", "class": "Normal", "binary": "Pass"}])
+    window._set_label_rules(
+        [{"raw_status": "OK", "class": "Normal", "binary": "Pass", "expanded_normal": "Normal"}]
+    )
     window._refresh_generate_state()
     window.start_generation()
     qtbot.waitUntil(lambda: "권한" in window.status_label.text(), timeout=3000)

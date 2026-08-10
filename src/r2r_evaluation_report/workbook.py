@@ -23,9 +23,9 @@ from openpyxl.worksheet.pagebreak import Break
 
 ROWS = 26
 NODES = 38
-MAP_HEADING_ROWS = (8, 43, 78)
-MAP_BODY_ROWS = (9, 44, 79)
-REPORT_TITLES = ("Measurement", "Prediction", "Binary Agreement")
+MAP_HEADING_ROWS = (8, 43, 78, 113)
+MAP_BODY_ROWS = (9, 44, 79, 114)
+REPORT_TITLES = ("Measurement", "Prediction", "Binary Agreement", "Expanded Normal scenario")
 THREE_LABELS = ("Normal", "Open", "Short")
 BINARY_LABELS = ("Pass", "Fail")
 JOINED_HEADERS = (
@@ -42,6 +42,9 @@ JOINED_HEADERS = (
     "Prediction Binary",
     "Agreement",
     "Source Row",
+    "Expanded Normal Actual",
+    "Expanded Normal Agreement",
+    "Expanded Normal Result",
 )
 
 MEASUREMENT_STYLES = {
@@ -189,10 +192,15 @@ def _prediction(row: Any) -> str:
     )
 
 
-def _profile_maps(evaluation: Any) -> tuple[dict[str, str], dict[str, str]]:
+def _profile_maps(evaluation: Any) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     profile = _value(evaluation, "status_mapping", "mapping_profile")
     three = _value(profile, "three_class", default={}) if profile is not None else {}
     binary = _value(profile, "binary", default={}) if profile is not None else {}
+    expanded = (
+        _value(profile, "expanded_normal", "expanded", default={})
+        if profile is not None
+        else {}
+    )
     direct_binary = _value(evaluation, "binary_status_mapping", default={})
     if not binary and direct_binary:
         binary = direct_binary
@@ -212,13 +220,24 @@ def _profile_maps(evaluation: Any) -> tuple[dict[str, str], dict[str, str]]:
         "short": "Fail",
         "nogateeffect": "Fail",
     }
+    defaults_expanded = {
+        "pass": "Normal",
+        "noactive": "Normal",
+        "none": "Normal",
+        "open": "Open",
+        "short": "Short",
+        "nogateeffect": "Normal",
+    }
     resolved_three = dict(defaults_three)
     resolved_binary = dict(defaults_binary)
+    resolved_expanded = dict(defaults_expanded)
     if isinstance(three, Mapping):
         resolved_three.update({_norm(key): _text(value) for key, value in three.items()})
     if isinstance(binary, Mapping):
         resolved_binary.update({_norm(key): _text(value) for key, value in binary.items()})
-    return resolved_three, resolved_binary
+    if isinstance(expanded, Mapping):
+        resolved_expanded.update({_norm(key): _text(value) for key, value in expanded.items()})
+    return resolved_three, resolved_binary, resolved_expanded
 
 
 def _canonical(row: Any, evaluation: Any) -> str:
@@ -228,7 +247,7 @@ def _canonical(row: Any, evaluation: Any) -> str:
     raw = _raw_measurement(row)
     if raw == "N/A":
         return "N/A"
-    three, _binary = _profile_maps(evaluation)
+    three, _binary, _expanded = _profile_maps(evaluation)
     return three.get(_norm(raw), "N/A")
 
 
@@ -248,7 +267,7 @@ def _binary_actual(row: Any, evaluation: Any) -> str:
     if not _complete_pair(row):
         return "N/A"
     raw = _raw_measurement(row)
-    _three, binary = _profile_maps(evaluation)
+    _three, binary, _expanded = _profile_maps(evaluation)
     mapped = binary.get(_norm(raw))
     if mapped in BINARY_LABELS:
         return mapped
@@ -267,6 +286,29 @@ def _binary_predicted(row: Any) -> str:
     if predicted in {"Open", "Short"}:
         return "Fail"
     return "N/A"
+
+
+def _expanded_actual(row: Any, evaluation: Any) -> str:
+    explicit = _text(_value(row, "expanded_normal_actual", "expanded_actual"))
+    if explicit:
+        return explicit
+    if not _complete_pair(row):
+        return "N/A"
+    raw = _raw_measurement(row)
+    _three, _binary, expanded = _profile_maps(evaluation)
+    mapped = expanded.get(_norm(raw))
+    return mapped if mapped in THREE_LABELS else "N/A"
+
+
+def _expanded_agreement(row: Any, evaluation: Any) -> str:
+    explicit = _text(_value(row, "expanded_normal_agreement", "expanded_agreement"))
+    if explicit:
+        return explicit
+    actual = _expanded_actual(row, evaluation)
+    predicted = _prediction(row)
+    if actual not in THREE_LABELS or predicted not in THREE_LABELS:
+        return "N/A"
+    return "Agree" if actual == predicted else "Disagree"
 
 
 def _agreement(row: Any, evaluation: Any) -> str:
@@ -454,13 +496,15 @@ def _fallback_metrics(
     evaluation: Any,
     labels: Sequence[str],
     binary: bool,
+    expanded: bool = False,
 ) -> dict[str, Any]:
     pairs: list[tuple[str, str]] = []
     for row in rows:
         if binary:
             actual, predicted = _binary_actual(row, evaluation), _binary_predicted(row)
         else:
-            actual, predicted = _canonical(row, evaluation), _prediction(row)
+            actual = _expanded_actual(row, evaluation) if expanded else _canonical(row, evaluation)
+            predicted = _prediction(row)
         if actual in labels and predicted in labels:
             pairs.append((actual, predicted))
     index = {label: position for position, label in enumerate(labels)}
@@ -534,34 +578,46 @@ def _fallback_yield(rows: Sequence[Any], evaluation: Any) -> dict[str, Any]:
     }
 
 
-def _sample_metrics(sample: Any, rows: Sequence[Any], evaluation: Any) -> tuple[Any, Any, Any]:
+def _sample_metrics(sample: Any, rows: Sequence[Any], evaluation: Any) -> tuple[Any, Any, Any, Any]:
     three = _value(sample, "mapped_three_class", "three_class_metrics")
     binary = _value(sample, "operational_binary", "binary_metrics")
+    expanded = _value(sample, "expanded_normal", "expanded_normal_metrics", "expanded_metrics")
     yield_stats = _value(sample, "yield_stats", "yield")
     if three is None:
         three = _fallback_metrics(rows, evaluation, THREE_LABELS, binary=False)
     if binary is None:
         binary = _fallback_metrics(rows, evaluation, BINARY_LABELS, binary=True)
+    if expanded is None:
+        expanded = _fallback_metrics(rows, evaluation, THREE_LABELS, binary=False, expanded=True)
     if yield_stats is None:
         yield_stats = _fallback_yield(rows, evaluation)
-    return three, binary, yield_stats
+    return three, binary, expanded, yield_stats
 
 
 def _overall_metrics(
     evaluation: Any,
     samples: Sequence[Any],
-) -> tuple[Any, Any, Any, list[Any]]:
+) -> tuple[Any, Any, Any, Any, list[Any]]:
     rows = [row for sample in samples for row in _records(sample)]
     three = _value(evaluation, "overall_three_class")
     binary = _value(evaluation, "overall_binary")
+    expanded = _value(evaluation, "overall_expanded_normal", "overall_expanded")
     yield_stats = _value(evaluation, "overall_yield", "yield_stats")
     if three is None:
         three = _fallback_metrics(rows, evaluation, THREE_LABELS, binary=False)
     if binary is None:
         binary = _fallback_metrics(rows, evaluation, BINARY_LABELS, binary=True)
+    if expanded is None:
+        expanded = _fallback_metrics(
+            rows,
+            evaluation,
+            THREE_LABELS,
+            binary=False,
+            expanded=True,
+        )
     if yield_stats is None:
         yield_stats = _fallback_yield(rows, evaluation)
-    return three, binary, yield_stats, rows
+    return three, binary, expanded, yield_stats, rows
 
 
 def _metric_counts(metrics: Any) -> Counter[tuple[str, str]]:
@@ -725,7 +781,9 @@ def _write_report_panel(
 ) -> None:
     for col in range(43, 66):
         ws.column_dimensions[get_column_letter(col)].width = 10
-    three_metrics, binary_metrics, yield_stats = _sample_metrics(sample, rows, evaluation)
+    three_metrics, binary_metrics, expanded_metrics, yield_stats = _sample_metrics(
+        sample, rows, evaluation
+    )
 
     total = int(_value(yield_stats, "total", default=0) or 0)
     measured_pass = int(_value(yield_stats, "measurement_pass_count", default=0) or 0)
@@ -857,6 +915,33 @@ def _write_report_panel(
         three_metrics,
         THREE_LABELS,
     )
+    _write_matrix(
+        ws,
+        113,
+        43,
+        "Expanded Normal scenario 3x3",
+        THREE_LABELS,
+        THREE_LABELS,
+        _metric_counts(expanded_metrics),
+    )
+    ws["AW113"], ws["AX113"], ws["AY113"] = "Class", "Actual", "Prediction"
+    for row, label in enumerate(THREE_LABELS, 114):
+        ws.cell(row, 49, label)
+        ws.cell(row, 50, sum(_expanded_actual(item, evaluation) == label for item in rows))
+        ws.cell(row, 51, sum(_prediction(item) == label for item in rows))
+    _style_header_row(ws, 113, 49, 51)
+    _write_legend(ws, 113, 60, "Expanded Normal legend", PREDICTION_STYLES)
+    _write_general_metrics(ws, 122, 43, "Expanded Normal scenario metrics", expanded_metrics)
+    _write_class_metrics(
+        ws, 122, 53, "Expanded Normal class metrics", expanded_metrics, THREE_LABELS
+    )
+    ws["AQ136"] = (
+        "Limitation: Expanded Normal is an additional image-observability/reporting assumption, "
+        "not a relabeling of original electrical ground truth. No Gate Effect is mapped to Normal; "
+        "Short remains Short. Raw, mapped 3-class, and Fail-positive binary results are preserved."
+    )
+    ws.merge_cells("AQ136:BM142")
+    ws["AQ136"].alignment = Alignment(wrap_text=True, vertical="top")
     ws["AQ101"] = (
         "Definitions: Fail is the positive binary class. Every complete pair is binary-eligible, "
         "including three-class Exclude statuses such as No Gate Effect. Missing pairs only are "
@@ -889,6 +974,7 @@ def _report_sheet(
     measurement_values: dict[tuple[int, int], tuple[str, str]] = {}
     prediction_values: dict[tuple[int, int], tuple[str, str]] = {}
     agreement_values: dict[tuple[int, int], tuple[str, str]] = {}
+    expanded_values: dict[tuple[int, int], tuple[str, str]] = {}
     for row in rows:
         coordinate = _coordinate(row)
         if coordinate[0] is None:
@@ -899,9 +985,12 @@ def _report_sheet(
         measurement_values[coordinate] = MEASUREMENT_STYLES.get(raw, UNKNOWN_STYLE)
         prediction_values[coordinate] = PREDICTION_STYLES.get(predicted, UNKNOWN_STYLE)
         agreement_values[coordinate] = AGREEMENT_STYLES.get(agreement, UNKNOWN_STYLE)
+        expanded_actual = _expanded_actual(row, evaluation)
+        expanded_values[coordinate] = PREDICTION_STYLES.get(expanded_actual, UNKNOWN_STYLE)
     _write_map(ws, 9, measurement_values)
     _write_map(ws, 44, prediction_values)
     _write_map(ws, 79, agreement_values)
+    _write_map(ws, 114, expanded_values)
     _write_report_panel(ws, sample, rows, evaluation)
     ws.sheet_view.showGridLines = False
     ws.page_setup.orientation = "landscape"
@@ -909,14 +998,15 @@ def _report_sheet(
     ws.page_setup.fitToWidth = 1
     # Leave vertical pagination unconstrained so Excel honors the two explicit
     # horizontal page breaks below.  Setting FitToHeight=3 causes desktop
-    # Excel to recalculate and collapse the three map bands into two pages.
+    # Excel to recalculate and collapse the four map bands into fewer logical pages.
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.print_area = "A1:BM107"
+    ws.print_area = "A1:BM142"
     # Break.id is the row after which openpyxl emits the break.  39/74 therefore
     # begin pages before Excel rows 40 and 75.
     ws.row_breaks.append(Break(id=39))
     ws.row_breaks.append(Break(id=74))
+    ws.row_breaks.append(Break(id=109))
     return ws
 
 
@@ -963,6 +1053,12 @@ def _readme_sheet(wb: Workbook, evaluation: Any) -> None:
             "Joined_Data contains coordinate keys and evaluation fields only; no 201-point "
             "measurement sweeps are copied into this report.",
         ),
+        (
+            "Expanded Normal scenario limitation",
+            "This is an additional image-observability/reporting assumption, not a relabeling of "
+            "electrical ground truth. It maps No Gate Effect to Normal while retaining Short as "
+            "Short; raw, mapped 3-class, and binary results remain unchanged.",
+        ),
     )
     for row, (label, value) in enumerate(notes, 3):
         ws.cell(row, 1, label).font = Font(bold=True)
@@ -997,15 +1093,21 @@ def _readme_sheet(wb: Workbook, evaluation: Any) -> None:
         ws.cell(row, 5).number_format = "0"
     profile_start = source_start + max(len(sources), 1) + 4
     _set_section(ws.cell(profile_start, 1), "Final status mapping profile")
-    headers = ("Normalized raw status", "Mapped 3-class", "Operational binary")
+    headers = (
+        "Normalized raw status",
+        "Mapped 3-class",
+        "Operational binary",
+        "Expanded Normal scenario",
+    )
     for col, header in enumerate(headers, 1):
         ws.cell(profile_start + 1, col, header)
-    _style_header_row(ws, profile_start + 1, 1, 3)
-    three, binary = _profile_maps(evaluation)
-    for row, raw in enumerate(sorted(set(three) | set(binary)), profile_start + 2):
+    _style_header_row(ws, profile_start + 1, 1, 4)
+    three, binary, expanded = _profile_maps(evaluation)
+    for row, raw in enumerate(sorted(set(three) | set(binary) | set(expanded)), profile_start + 2):
         ws.cell(row, 1, raw)
         ws.cell(row, 2, three.get(raw, "N/A"))
         ws.cell(row, 3, binary.get(raw, "N/A"))
+        ws.cell(row, 4, expanded.get(raw, "N/A"))
     ws.column_dimensions["A"].width = 25
     ws.column_dimensions["B"].width = 70
     ws.column_dimensions["C"].width = 68
@@ -1017,7 +1119,7 @@ def _readme_sheet(wb: Workbook, evaluation: Any) -> None:
 
 def _mapping_audit_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) -> None:
     ws = wb.create_sheet("Mapping_Audit")
-    _title(ws, "Mapping audit", "I")
+    _title(ws, "Mapping audit", "J")
     headers = (
         "Measurement Sample",
         "Prediction Sample",
@@ -1027,6 +1129,7 @@ def _mapping_audit_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) 
         "Signature / Raw Status",
         "Canonical",
         "Operational Binary",
+        "Expanded Normal",
         "Note",
     )
     for col, header in enumerate(headers, 1):
@@ -1052,12 +1155,13 @@ def _mapping_audit_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) 
         ws.cell(row, 1, name)
         ws.cell(row, 3, "unmatched measurement-only")
         row += 1
-    three, binary = _profile_maps(evaluation)
+    three, binary, expanded = _profile_maps(evaluation)
     for raw in _items(_value(evaluation, "unresolved_measurement_statuses")):
         ws.cell(row, 3, "unknown mapping")
         ws.cell(row, 6, raw)
         ws.cell(row, 7, three.get(_norm(raw), "N/A"))
         ws.cell(row, 8, binary.get(_norm(raw), "N/A"))
+        ws.cell(row, 9, expanded.get(_norm(raw), "N/A"))
         row += 1
     for prediction in _items(_value(evaluation, "unknown_predictions")):
         ws.cell(row, 2, prediction)
@@ -1065,7 +1169,7 @@ def _mapping_audit_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) 
         row += 1
     for error in _items(_value(evaluation, "mapping_errors")):
         ws.cell(row, 3, "mapping error")
-        ws.cell(row, 9, error)
+        ws.cell(row, 10, error)
         row += 1
     if row == 4 and samples:
         for index, sample in enumerate(samples, 1):
@@ -1073,8 +1177,8 @@ def _mapping_audit_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) 
             ws.cell(row, 3, "evaluated")
             row += 1
     ws.freeze_panes = "A4"
-    ws.auto_filter.ref = f"A3:I{max(row - 1, 3)}"
-    widths = (30, 30, 24, 14, 20, 28, 18, 20, 60)
+    ws.auto_filter.ref = f"A3:J{max(row - 1, 3)}"
+    widths = (30, 30, 24, 14, 20, 28, 18, 20, 22, 60)
     for col, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
 
@@ -1085,7 +1189,7 @@ def _joined_sheet(
     samples: Sequence[Any],
 ) -> None:
     ws = wb.create_sheet("Joined_Data")
-    _title(ws, "Joined coordinate-level data", "M")
+    _title(ws, "Joined coordinate-level data", "P")
     for col, header in enumerate(JOINED_HEADERS, 1):
         ws.cell(3, col, header)
     _style_header_row(ws, 3, 1, len(JOINED_HEADERS))
@@ -1107,13 +1211,16 @@ def _joined_sheet(
                 _binary_predicted(row),
                 _agreement(row, evaluation),
                 _source_row(row),
+                _expanded_actual(row, evaluation),
+                _expanded_agreement(row, evaluation),
+                "Included" if _expanded_actual(row, evaluation) in THREE_LABELS else "Excluded/N/A",
             )
             for col, value in enumerate(values, 1):
                 ws.cell(output_row, col, value)
             output_row += 1
     ws.freeze_panes = "A4"
-    ws.auto_filter.ref = f"A3:M{max(output_row - 1, 3)}"
-    widths = (32, 8, 8, 22, 16, 14, 12, 12, 12, 20, 18, 12, 12)
+    ws.auto_filter.ref = f"A3:P{max(output_row - 1, 3)}"
+    widths = (32, 8, 8, 22, 16, 14, 12, 12, 12, 20, 18, 12, 12, 22, 24, 20)
     for col, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
 
@@ -1170,7 +1277,9 @@ def _summary_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) -> Non
     for col, header in enumerate(headers, 1):
         ws.cell(3, col, header)
     _style_header_row(ws, 3, 1, len(headers))
-    overall_three, overall_binary, overall_yield, all_rows = _overall_metrics(evaluation, samples)
+    overall_three, overall_binary, overall_expanded, overall_yield, all_rows = _overall_metrics(
+        evaluation, samples
+    )
     overall_missing = sum(not _complete_pair(row) for row in all_rows)
     overall_excluded = sum(
         len(_items(_value(sample, "excluded", default=()))) for sample in samples
@@ -1190,7 +1299,7 @@ def _summary_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) -> Non
     for index, sample in enumerate(samples, 1):
         row_number = 4 + index
         rows = _records(sample)
-        three, binary, yield_stats = _sample_metrics(sample, rows, evaluation)
+        three, binary, _expanded, yield_stats = _sample_metrics(sample, rows, evaluation)
         excluded = len(_items(_value(sample, "excluded", default=())))
         missing = sum(not _complete_pair(row) for row in rows)
         ws.cell(row_number, 1, _sample_name(sample, index))
@@ -1252,7 +1361,6 @@ def _summary_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) -> Non
         THREE_LABELS,
         raw_counts,
     )
-
     distribution_row = max(section_row + 7, raw_end + 2)
     _set_section(ws.cell(distribution_row, 1), "Overall class distributions")
     ws.cell(distribution_row + 1, 1, "Class")
@@ -1276,7 +1384,7 @@ def _summary_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) -> Non
     _style_header_row(ws, rank_row + 1, 6, 9)
     ranked: list[tuple[str, Any, Any]] = []
     for index, sample in enumerate(samples, 1):
-        _three, binary, _yield = _sample_metrics(sample, _records(sample), evaluation)
+        _three, binary, _expanded, _yield = _sample_metrics(sample, _records(sample), evaluation)
         fail = _class_metric(binary, "Fail")
         ranked.append(
             (
@@ -1344,11 +1452,72 @@ def _summary_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) -> Non
         ws.row_dimensions[row].height = max(ws.row_dimensions[row].height or 15, 26)
     ws.freeze_panes = "A4"
     ws.sheet_view.showGridLines = False
-    summary_last_row = max(
+    second_page_last = max(
         distribution_row + len(distribution_labels) + 1,
         rank_row + len(ranked) + 1,
         audit_row + len(audit_entries) + 2,
     )
+    # Dedicated third A3 page for the Expanded Normal scenario keeps the
+    # existing second-page tables untouched and avoids overlap.
+    scenario_start = second_page_last + 3
+    _set_section(ws.cell(scenario_start, 1), "Expanded Normal scenario — per-sample KPI")
+    scenario_headers = ("Sample", "Total", "Accuracy", "Macro F1", "Weighted F1", "Normal support")
+    for col, header in enumerate(scenario_headers, 1):
+        ws.cell(scenario_start + 1, col, header)
+    _style_header_row(ws, scenario_start + 1, 1, len(scenario_headers))
+    for index, sample in enumerate(samples, 1):
+        _three, _binary, expanded, _yield = _sample_metrics(sample, _records(sample), evaluation)
+        row = scenario_start + 1 + index
+        ws.cell(row, 1, _sample_name(sample, index))
+        ws.cell(row, 2, _value(expanded, "total", default=0))
+        _format_metric(ws.cell(row, 3), _value(expanded, "accuracy"))
+        _format_metric(ws.cell(row, 4), _value(expanded, "macro_f1"))
+        _format_metric(ws.cell(row, 5), _value(expanded, "weighted_f1"))
+        normal_metric = _class_metric(expanded, "Normal")
+        ws.cell(row, 6, _value(normal_metric, "support", default=0))
+    overall_row = scenario_start + 2 + len(samples)
+    ws.cell(overall_row, 1, "OVERALL")
+    ws.cell(overall_row, 2, _value(overall_expanded, "total", default=0))
+    _format_metric(ws.cell(overall_row, 3), _value(overall_expanded, "accuracy"))
+    _format_metric(ws.cell(overall_row, 4), _value(overall_expanded, "macro_f1"))
+    _format_metric(ws.cell(overall_row, 5), _value(overall_expanded, "weighted_f1"))
+    normal_metric = _class_metric(overall_expanded, "Normal")
+    ws.cell(overall_row, 6, _value(normal_metric, "support", default=0))
+    matrix_row = overall_row + 3
+    _write_matrix(
+        ws, matrix_row, 1, "Overall Expanded Normal scenario 3x3", THREE_LABELS, THREE_LABELS,
+        _metric_counts(overall_expanded)
+    )
+    scenario_distribution_row = matrix_row
+    _set_section(ws.cell(scenario_distribution_row, 7), "Expanded Normal class distribution")
+    ws.cell(scenario_distribution_row + 1, 7, "Class")
+    ws.cell(scenario_distribution_row + 1, 8, "Actual")
+    ws.cell(scenario_distribution_row + 1, 9, "Prediction")
+    _style_header_row(ws, scenario_distribution_row + 1, 7, 9)
+    expanded_actual_distribution = Counter(_expanded_actual(row, evaluation) for row in all_rows)
+    for offset, label in enumerate(THREE_LABELS, 2):
+        ws.cell(scenario_distribution_row + offset, 7, label)
+        ws.cell(scenario_distribution_row + offset, 8, expanded_actual_distribution[label])
+        ws.cell(scenario_distribution_row + offset, 9, predicted_distribution[label])
+    _write_general_metrics(
+        ws, matrix_row + 7, 1, "Expanded Normal general metrics", overall_expanded
+    )
+    _write_class_metrics(
+        ws, matrix_row + 7, 8, "Expanded Normal class metrics", overall_expanded, THREE_LABELS
+    )
+    limitation_row = matrix_row + 15
+    ws.cell(
+        limitation_row,
+        1,
+        "Limitation: Expanded Normal is an image-observability/reporting assumption, "
+        "not electrical ground-truth relabeling. No Gate Effect maps to Normal; "
+        "Short remains Short.",
+    )
+    ws.merge_cells(
+        start_row=limitation_row, start_column=1, end_row=limitation_row + 2, end_column=17
+    )
+    ws.cell(limitation_row, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    summary_last_row = limitation_row + 2
     ws.page_setup.orientation = "landscape"
     ws.page_setup.paperSize = ws.PAPERSIZE_A3
     ws.page_setup.fitToWidth = 1
@@ -1356,6 +1525,7 @@ def _summary_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) -> Non
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.print_area = f"A1:Q{summary_last_row}"
     ws.row_breaks.append(Break(id=section_row - 1))
+    ws.row_breaks.append(Break(id=scenario_start - 1))
 
 
 def _cancelled(check: Callable[[], bool] | Any | None) -> bool:
@@ -1394,7 +1564,10 @@ def verify_workbook_structure(path_or_workbook: str | Path | Workbook) -> None:
         if reports != expected_reports:
             raise ValueError("Report tabs must be ordered safe Rnn identifiers")
         joined = wb["Joined_Data"]
-        if tuple(joined.cell(3, col).value for col in range(1, 14)) != JOINED_HEADERS:
+        if (
+            tuple(joined.cell(3, col).value for col in range(1, len(JOINED_HEADERS) + 1))
+            != JOINED_HEADERS
+        ):
             raise ValueError("Joined_Data has an unexpected data contract")
         if joined.freeze_panes != "A4" or joined.auto_filter.ref is None:
             raise ValueError("Joined_Data must retain freeze panes and filter")
@@ -1402,18 +1575,18 @@ def verify_workbook_structure(path_or_workbook: str | Path | Workbook) -> None:
             ws = wb[name]
             if not _text(ws["A1"].value).startswith("R2R Evaluation Report — "):
                 raise ValueError(f"{name}: full report title missing")
-            if not str(ws.print_area).endswith("!$A$1:$BM$107"):
-                raise ValueError(f"{name}: print area must be A1:BM107")
-            if ws.max_row > 107 or ws.max_column > 65:
+            if not str(ws.print_area).endswith("!$A$1:$BM$142"):
+                raise ValueError(f"{name}: print area must be A1:BM142")
+            if ws.max_row > 142 or ws.max_column > 65:
                 raise ValueError(f"{name}: content extends beyond print area")
             if ws.page_setup.orientation != "landscape" or str(ws.page_setup.paperSize) != str(
                 ws.PAPERSIZE_A3
             ):
                 raise ValueError(f"{name}: expected A3 landscape")
             if ws.page_setup.fitToWidth != 1 or ws.page_setup.fitToHeight != 0:
-                raise ValueError(f"{name}: expected fit to one page wide / three high")
-            if [item.id for item in ws.row_breaks.brk] != [39, 74]:
-                raise ValueError(f"{name}: expected breaks before rows 40 and 75")
+                raise ValueError(f"{name}: expected fit to one page wide / automatic height")
+            if [item.id for item in ws.row_breaks.brk] != [39, 74, 109]:
+                raise ValueError(f"{name}: expected breaks before rows 40, 75, and 110")
             if any(
                 ws.column_dimensions[get_column_letter(col)].width != 2.5 for col in range(3, 42)
             ):
@@ -1433,6 +1606,10 @@ def verify_workbook_structure(path_or_workbook: str | Path | Workbook) -> None:
                 raise ValueError(f"{name}: prediction legend is outside page band")
             if ws["BH76"].value != "Agreement legend":
                 raise ValueError(f"{name}: agreement legend is outside page band")
+            if ws.cell(113, 3).value != "Row / Node":
+                raise ValueError(f"{name}: expanded scenario map is missing")
+            if ws["AW113"].value != "Class" or ws["BH113"].value != "Expanded Normal legend":
+                raise ValueError(f"{name}: expanded scenario distribution/legend is missing")
             if len(ws._charts) != 2:
                 raise ValueError(f"{name}: expected exactly two native charts")
             first, second = ws._charts
@@ -1455,8 +1632,8 @@ def verify_workbook_structure(path_or_workbook: str | Path | Workbook) -> None:
             raise ValueError("Overall Summary must print one A3 page wide")
         if not str(summary.print_area).startswith("'Overall Summary'!$A$1:$Q$"):
             raise ValueError("Overall Summary print area is invalid")
-        if len(summary.row_breaks.brk) != 1:
-            raise ValueError("Overall Summary requires one logical page break")
+        if len(summary.row_breaks.brk) != 2:
+            raise ValueError("Overall Summary requires two logical page breaks")
     finally:
         if close:
             wb.close()

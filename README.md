@@ -10,7 +10,7 @@
 2. 출력할 `.xlsx` 경로를 지정하고 **사전 검사**를 실행합니다.
 3. 날짜·kgf·SAM 서명으로 제안된 연결을 검토하고 각 행의 **확인** 또는
    **제안 연결 전체 확인**을 선택합니다.
-4. 새 raw status가 있으면 3-class와 binary 규칙을 모두 선택합니다.
+4. 새 raw status가 있으면 3-class, binary, 확장 Normal 규칙을 모두 선택합니다.
 5. **Excel 생성**을 누른 뒤 통합문서 또는 출력 폴더를 엽니다.
 
 생성 중에는 입력과 규칙이 잠기며 취소할 수 있습니다. 기존 출력은 성공적인 임시 파일
@@ -34,6 +34,8 @@
 
 - 3-class: `Pass/No Active/None → Normal`, `Open → Open`, `Short → Short`,
   `No Gate Effect → Exclude`.
+- Expanded Normal scenario: `Pass/No Active/None/No Gate Effect → Normal`, `Open → Open`, `Short → Short`.
+  이는 원래 전기적 ground truth를 재라벨링하지 않는 이미지 관찰/리포팅 가정이며 raw/3-class/binary 결과를 보존합니다.
 - 운영 binary 가정: measurement `Pass → Pass`, 그 외 `Fail`; prediction
   `Normal → Pass`, `Open/Short → Fail`; positive class는 `Fail`입니다.
 - 정의할 수 없는 precision/recall/F1과 모든 target class가 없는 3-class macro-F1은
@@ -44,13 +46,14 @@
 ## 출력 workbook
 
 시트 순서는 `README → Mapping_Audit → Joined_Data → R01…Rnn → Overall Summary`입니다.
-각 report tab은 A3 landscape 3쪽으로 출력됩니다.
+각 report tab은 A3 landscape 4쪽으로 출력됩니다.
 
 - Measurement map: `C8:AO34`, 실제 26 × 38 body `D9:AO34`
 - Prediction map: `C43:AO69`, 실제 body `D44:AO69`
 - Binary Agreement map: `C78:AO104`, 실제 body `D79:AO104`
+- Expanded Normal scenario map: `C113:AO139`, 실제 body `D114:AO139`
 - 오른쪽 패널: yield·class 분포·raw 교차표·3×3/2×2 matrix·정의와 제한
-- `Joined_Data`: 결과 재현에 필요한 좌표·라벨·확률·agreement·source row만 보존
+- `Joined_Data`: 결과 재현에 필요한 좌표·라벨·확률·agreement·source row와 Expanded Normal 필드를 보존
 - `README`: 입력 경로, SHA-256, size, mtime, 최종 mapping profile과 운영 가정
 
 ## 개발 및 검증
