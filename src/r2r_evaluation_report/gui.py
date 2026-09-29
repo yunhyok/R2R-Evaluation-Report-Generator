@@ -81,6 +81,7 @@ class CoreWorkflowAdapter:
         self._measurements: Any | None = None
         self._predictions: Any | None = None
         self._audit: Any | None = None
+        self._source_selection: tuple[Any, ...] | None = None
 
     @staticmethod
     def _known_label(raw: str) -> str | None:
@@ -111,10 +112,24 @@ class CoreWorkflowAdapter:
 
     def preflight(self, context: WorkflowContext) -> dict[str, Any]:
         core = importlib.import_module("r2r_evaluation_report.core")
+        self._measurements = self._predictions = self._audit = None
+        self._source_selection = None
+        if not context.measurement_path and not context.prediction_path:
+            raise RuntimeError("측정 데이터 또는 예측 결과 중 하나 이상을 선택하세요.")
         context.progress(8, "유효한 헤더와 워크시트를 찾는 중…")
-        measurement_candidates = core.discover_worksheets(context.measurement_path, "measurement")
-        prediction_candidates = core.discover_worksheets(context.prediction_path, "prediction")
-        if not measurement_candidates or not prediction_candidates:
+        measurement_candidates = (
+            core.discover_worksheets(context.measurement_path, "measurement")
+            if context.measurement_path
+            else ()
+        )
+        prediction_candidates = (
+            core.discover_worksheets(context.prediction_path, "prediction")
+            if context.prediction_path
+            else ()
+        )
+        if (context.measurement_path and not measurement_candidates) or (
+            context.prediction_path and not prediction_candidates
+        ):
             raise RuntimeError(
                 "필수 헤더(Name, Row, Node 및 Status/Prediction)를 가진 시트를 찾지 못했습니다."
             )
@@ -132,20 +147,60 @@ class CoreWorkflowAdapter:
                 "measurement": {"sheet_candidates": measurement_names},
                 "prediction": {"sheet_candidates": prediction_names},
             }
-        selected_measurement = context.measurement_sheet or measurement_names[0]
-        selected_prediction = context.prediction_sheet or prediction_names[0]
+        selected_measurement = (
+            context.measurement_sheet or measurement_names[0] if measurement_names else None
+        )
+        selected_prediction = (
+            context.prediction_sheet or prediction_names[0] if prediction_names else None
+        )
         context.progress(25, "선택한 시트의 26×38 좌표를 검사하는 중…")
-        measurements = core.parse_dataset(
-            context.measurement_path, "measurement", selected_measurement
+        measurements = (
+            core.parse_dataset(context.measurement_path, "measurement", selected_measurement)
+            if context.measurement_path
+            else None
         )
         if context.cancel_event.is_set():
             raise OperationCancelled()
-        predictions = core.parse_dataset(context.prediction_path, "prediction", selected_prediction)
+        predictions = (
+            core.parse_dataset(context.prediction_path, "prediction", selected_prediction)
+            if context.prediction_path
+            else None
+        )
         if context.cancel_event.is_set():
             raise OperationCancelled()
+        if measurements is None or predictions is None:
+            dataset = measurements if measurements is not None else predictions
+            description = core.describe_dataset(dataset)
+            if description.blocked:
+                raise RuntimeError(
+                    "알 수 없는 예측 라벨: " + ", ".join(description.unknown_predictions)
+                )
+            self._measurements, self._predictions = measurements, predictions
+            self._source_selection = (
+                context.measurement_path,
+                context.prediction_path,
+                selected_measurement,
+                selected_prediction,
+            )
+            kind_label = "측정" if measurements is not None else "예측"
+            return {
+                "single_source_ready": True,
+                "summary": (
+                    f"{kind_label} 단독 보고서: {len(dataset.sheets)}개 샘플의 라벨 맵과 "
+                    "분포를 생성합니다. 비교 상대가 없어 F1·혼동행렬·일치도는 생략합니다."
+                ),
+                "measurement": {"sheet_candidates": measurement_names},
+                "prediction": {"sheet_candidates": prediction_names},
+            }
         context.progress(70, "시트 연결과 원본 라벨을 검사하는 중…")
         audit = core.preflight(measurements, predictions)
         self._measurements, self._predictions, self._audit = measurements, predictions, audit
+        self._source_selection = (
+            context.measurement_path,
+            context.prediction_path,
+            selected_measurement,
+            selected_prediction,
+        )
         mappings = [
             {
                 "measurement": proposal.measurement_sheet,
@@ -211,47 +266,59 @@ class CoreWorkflowAdapter:
         }
 
     def generate(self, context: WorkflowContext) -> dict[str, Any]:
-        if self._measurements is None or self._predictions is None or self._audit is None:
+        if self._source_selection is None:
             raise RuntimeError("사전 검사를 먼저 완료한 뒤 생성하세요.")
+        selection = (
+            context.measurement_path,
+            context.prediction_path,
+            context.measurement_sheet or self._source_selection[2],
+            context.prediction_sheet or self._source_selection[3],
+        )
+        if selection != self._source_selection:
+            raise RuntimeError("입력 파일 또는 시트가 바뀌었습니다. 사전 검사를 다시 실행하세요.")
         core = importlib.import_module("r2r_evaluation_report.core")
         workbook = importlib.import_module("r2r_evaluation_report.workbook")
-        by_pair = {
-            (proposal.measurement_sheet, proposal.prediction_sheet): proposal
-            for proposal in self._audit.proposals
-        }
-        approved = []
-        for row in context.mappings:
-            if not row.get("confirmed"):
-                continue
-            proposal = by_pair.get((row.get("measurement"), row.get("prediction")))
-            if proposal is not None:
-                approved.append(
-                    core.MappingProposal(
-                        proposal.measurement_sheet,
-                        proposal.prediction_sheet,
-                        proposal.method,
-                        False,
-                        proposal.signature,
+        if self._measurements is None or self._predictions is None:
+            dataset = self._measurements if self._measurements is not None else self._predictions
+            evaluation = core.describe_dataset(dataset)
+        else:
+            by_pair = {
+                (proposal.measurement_sheet, proposal.prediction_sheet): proposal
+                for proposal in self._audit.proposals
+            }
+            approved = []
+            for row in context.mappings:
+                if not row.get("confirmed"):
+                    continue
+                proposal = by_pair.get((row.get("measurement"), row.get("prediction")))
+                if proposal is not None:
+                    approved.append(
+                        core.MappingProposal(
+                            proposal.measurement_sheet,
+                            proposal.prediction_sheet,
+                            proposal.method,
+                            False,
+                            proposal.signature,
+                        )
+                        if proposal.requires_confirmation
+                        else proposal
                     )
-                    if proposal.requires_confirmation
-                    else proposal
-                )
-        if not approved:
-            raise RuntimeError("확인된 측정·예측 시트 연결이 없습니다.")
-        rules = {rule["raw_status"]: rule["class"] for rule in context.label_rules}
-        binary_rules = {rule["raw_status"]: rule["binary"] for rule in context.label_rules}
-        expanded_rules = {
-            rule["raw_status"]: rule["expanded_normal"] for rule in context.label_rules
-        }
-        context.progress(12, "선택한 규칙으로 평가 지표를 계산하는 중…")
-        evaluation = core.evaluate(
-            self._measurements,
-            self._predictions,
-            approved,
-            status_rules=rules,
-            binary_status_rules=binary_rules,
-            expanded_normal_status_rules=expanded_rules,
-        )
+            if not approved:
+                raise RuntimeError("확인된 측정·예측 시트 연결이 없습니다.")
+            rules = {rule["raw_status"]: rule["class"] for rule in context.label_rules}
+            binary_rules = {rule["raw_status"]: rule["binary"] for rule in context.label_rules}
+            expanded_rules = {
+                rule["raw_status"]: rule["expanded_normal"] for rule in context.label_rules
+            }
+            context.progress(12, "선택한 규칙으로 평가 지표를 계산하는 중…")
+            evaluation = core.evaluate(
+                self._measurements,
+                self._predictions,
+                approved,
+                status_rules=rules,
+                binary_status_rules=binary_rules,
+                expanded_normal_status_rules=expanded_rules,
+            )
         if evaluation.blocked:
             details = ", ".join(
                 (
@@ -348,6 +415,7 @@ class MainWindow(QMainWindow):
         self._unmatched_measurements: list[str] = []
         self._last_output_path: str | None = None
         self._last_color_only_path: str | None = None
+        self._single_source_ready = False
         self._file_buttons: list[QPushButton] = []
         self._build_ui()
         self._connect_signals()
@@ -369,6 +437,7 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(content)
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(12)
+        root.setAlignment(Qt.AlignTop)
 
         title = QLabel("R2R 평가 리포트 생성기")
         title.setStyleSheet("font-size: 20px; font-weight: 700;")
@@ -376,6 +445,12 @@ class MainWindow(QMainWindow):
         subtitle = QLabel("파일 선택 → 사전 검사 → 연결·라벨 확인 → Excel 생성")
         subtitle.setStyleSheet("color: #5f6b7a;")
         root.addWidget(subtitle)
+        input_hint = QLabel(
+            "측정·예측 중 하나만 선택해도 라벨 맵과 분포를 생성합니다. "
+            "두 파일을 선택하면 비교 보고서를 생성합니다."
+        )
+        input_hint.setWordWrap(True)
+        root.addWidget(input_hint)
 
         input_box = QGroupBox("1. 입력과 출력 파일")
         input_layout = QGridLayout(input_box)
@@ -386,6 +461,8 @@ class MainWindow(QMainWindow):
         self.prediction_edit, self.prediction_preview = self._path_row(
             input_layout, 1, "예측 결과", "예측 CSV 또는 XLSX 파일", self._choose_prediction
         )
+        self.measurement_edit.setClearButtonEnabled(True)
+        self.prediction_edit.setClearButtonEnabled(True)
         self.output_edit, self.output_preview = self._path_row(
             input_layout,
             2,
@@ -424,6 +501,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.summary_label)
 
         mapping_box = QGroupBox("3. 측정·예측 샘플 연결 확인")
+        self.mapping_box = mapping_box
         mapping_layout = QVBoxLayout(mapping_box)
         self.mapping_table = QTableWidget(0, 4)
         self.mapping_table.setHorizontalHeaderLabels(
@@ -454,6 +532,7 @@ class MainWindow(QMainWindow):
         root.addWidget(mapping_box)
 
         label_box = QGroupBox("4. 라벨 규칙 확인")
+        self.label_box = label_box
         label_layout = QVBoxLayout(label_box)
         self.label_table = QTableWidget(0, 4)
         self.label_table.setHorizontalHeaderLabels(
@@ -548,8 +627,8 @@ class MainWindow(QMainWindow):
         self.open_workbook_button.clicked.connect(self.open_workbook)
         self.open_color_only_button.clicked.connect(self.open_color_only_workbook)
         self.open_folder_button.clicked.connect(self.open_folder)
-        self.measurement_sheet_combo.currentIndexChanged.connect(self._refresh_generate_state)
-        self.prediction_sheet_combo.currentIndexChanged.connect(self._refresh_generate_state)
+        self.measurement_sheet_combo.currentIndexChanged.connect(self._sheet_changed)
+        self.prediction_sheet_combo.currentIndexChanged.connect(self._sheet_changed)
 
     def _choose_measurement(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -573,6 +652,9 @@ class MainWindow(QMainWindow):
             self.output_edit.setText(path if path.lower().endswith(".xlsx") else f"{path}.xlsx")
 
     def _paths_changed(self) -> None:
+        self._single_source_ready = False
+        self._set_sheet_candidates(self.measurement_sheet_combo, [])
+        self._set_sheet_candidates(self.prediction_sheet_combo, [])
         self.measurement_preview.set_path(self.measurement_edit.text())
         self.prediction_preview.set_path(self.prediction_edit.text())
         self.output_preview.set_path(self.output_edit.text())
@@ -596,14 +678,23 @@ class MainWindow(QMainWindow):
         self.open_folder_button.hide()
         self._refresh_generate_state()
 
+    def _sheet_changed(self, *_: Any) -> None:
+        self._single_source_ready = False
+        self._set_mappings([])
+        self._set_label_rules([])
+        self.summary_label.setText("시트가 변경되었습니다. 사전 검사를 다시 실행하세요.")
+        self._refresh_generate_state()
+
     def _validate_paths(self) -> str | None:
         entries = (
             ("측정 데이터", self.measurement_edit.text()),
             ("예측 결과", self.prediction_edit.text()),
         )
+        if not any(value.strip() for _, value in entries):
+            return "측정 데이터 또는 예측 결과 중 하나 이상을 선택하세요."
         for name, value in entries:
             if not value.strip():
-                return f"{name} 파일을 선택하세요."
+                continue
             if Path(value).suffix.lower() not in ALLOWED_INPUT_SUFFIXES:
                 return f"{name}는 CSV 또는 XLSX 파일이어야 합니다."
             if not Path(value).is_file():
@@ -618,6 +709,9 @@ class MainWindow(QMainWindow):
         parent = Path(output).parent
         if not parent.is_dir():
             return "출력 폴더를 찾을 수 없습니다. 저장 위치를 다시 지정하세요."
+        inputs = {Path(value.strip()).resolve() for _, value in entries if value.strip()}
+        if inputs.intersection({Path(output).resolve(), derive_color_only_path(output).resolve()}):
+            return "출력 파일은 입력 파일과 다른 경로를 지정하세요."
         return None
 
     def start_preflight(self) -> None:
@@ -625,6 +719,9 @@ class MainWindow(QMainWindow):
         if message:
             self._show_error(message)
             return
+        self._single_source_ready = False
+        self._set_mappings([])
+        self._set_label_rules([])
         self._start_operation("preflight")
 
     def start_generation(self) -> None:
@@ -764,6 +861,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(status)
 
     def _apply_preflight(self, result: dict[str, Any]) -> None:
+        self._single_source_ready = bool(result.get("single_source_ready"))
         # Accepted aliases allow the core package to return a clear domain model.
         measurement = result.get("measurement") or result.get("measurement_summary") or {}
         prediction = result.get("prediction") or result.get("prediction_summary") or {}
@@ -817,6 +915,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _set_sheet_candidates(combo: QComboBox, candidates: list[Any]) -> None:
+        previous = combo.currentText()
         combo.blockSignals(True)
         combo.clear()
         for candidate in candidates:
@@ -830,6 +929,8 @@ class MainWindow(QMainWindow):
                 combo.addItem(name, candidate.get("name") or candidate.get("sheet") or name)
             else:
                 combo.addItem(str(candidate), str(candidate))
+        if previous and combo.findText(previous) >= 0:
+            combo.setCurrentText(previous)
         combo.blockSignals(False)
 
     def _set_mappings(self, rows: list[Any]) -> None:
@@ -955,18 +1056,16 @@ class MainWindow(QMainWindow):
         self.unresolved_label.setText(
             "생성 차단: 미해결 원본 라벨 — " + ", ".join(unresolved) if unresolved else ""
         )
-        valid_paths = all(
-            (
-                self.measurement_edit.text().strip(),
-                self.prediction_edit.text().strip(),
-                self.output_edit.text().strip(),
-            )
+        comparison = bool(
+            self.measurement_edit.text().strip() and self.prediction_edit.text().strip()
         )
+        self.mapping_box.setVisible(comparison)
+        self.label_box.setVisible(comparison)
+        valid_paths = self._validate_paths() is None
         working = self._thread is not None and self._thread.isRunning()
         self.generate_button.setEnabled(
             valid_paths
-            and confirmed
-            and bool(rules)
+            and ((confirmed and bool(rules)) if comparison else self._single_source_ready)
             and not pending
             and not self._unmatched_measurements
             and not working

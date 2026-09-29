@@ -12,11 +12,13 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from colorsys import hsv_to_rgb
 from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, Reference
+from openpyxl.chart.marker import DataPoint
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.pagebreak import Break
@@ -205,9 +207,7 @@ def _profile_maps(evaluation: Any) -> tuple[dict[str, str], dict[str, str], dict
     three = _value(profile, "three_class", default={}) if profile is not None else {}
     binary = _value(profile, "binary", default={}) if profile is not None else {}
     expanded = (
-        _value(profile, "expanded_normal", "expanded", default={})
-        if profile is not None
-        else {}
+        _value(profile, "expanded_normal", "expanded", default={}) if profile is not None else {}
     )
     direct_binary = _value(evaluation, "binary_status_mapping", default={})
     if not binary and direct_binary:
@@ -1054,6 +1054,9 @@ def _readme_sheet(
     ws = wb.active
     ws.title = "README"
     _title(ws, "R2R Evaluation Workbook — operational and provenance record", "J")
+    mode = _value(evaluation, "report_mode", default="comparison")
+    ws["A2"] = "Report mode"
+    ws["B2"] = mode
     notes = (
         (
             "Operational binary",
@@ -1077,6 +1080,13 @@ def _readme_sheet(
             "Short; raw, mapped 3-class, and binary results remain unchanged.",
         ),
     )
+    if mode != "comparison":
+        notes = (
+            ("Input source", f"{mode.title()} only; the other source was not supplied."),
+            ("Report scope", "Original label maps, label counts/shares, and source coordinates."),
+            ("Comparison metrics", "Omitted: no paired reference for F1 or confusion matrices."),
+            ("Label semantics", "Original labels are preserved without relabeling or scoring."),
+        )
     for row, (label, value) in enumerate(notes, 3):
         ws.cell(row, 1, label).font = Font(bold=True)
         ws.cell(row, 2, value).alignment = Alignment(wrap_text=True, vertical="top")
@@ -1115,23 +1125,26 @@ def _readme_sheet(
         ws.cell(row, 7, _text(_value(source, "worksheet"), "N/A"))
         ws.cell(row, 4).number_format = "#,##0"
         ws.cell(row, 5).number_format = "0"
-    profile_start = source_start + max(len(sources), 1) + 4
-    _set_section(ws.cell(profile_start, 1), "Final status mapping profile")
-    headers = (
-        "Normalized raw status",
-        "Mapped 3-class",
-        "Operational binary",
-        "Expanded Normal scenario",
-    )
-    for col, header in enumerate(headers, 1):
-        ws.cell(profile_start + 1, col, header)
-    _style_header_row(ws, profile_start + 1, 1, 4)
-    three, binary, expanded = _profile_maps(evaluation)
-    for row, raw in enumerate(sorted(set(three) | set(binary) | set(expanded)), profile_start + 2):
-        ws.cell(row, 1, raw)
-        ws.cell(row, 2, three.get(raw, "N/A"))
-        ws.cell(row, 3, binary.get(raw, "N/A"))
-        ws.cell(row, 4, expanded.get(raw, "N/A"))
+    if mode == "comparison":
+        profile_start = source_start + max(len(sources), 1) + 4
+        _set_section(ws.cell(profile_start, 1), "Final status mapping profile")
+        headers = (
+            "Normalized raw status",
+            "Mapped 3-class",
+            "Operational binary",
+            "Expanded Normal scenario",
+        )
+        for col, header in enumerate(headers, 1):
+            ws.cell(profile_start + 1, col, header)
+        _style_header_row(ws, profile_start + 1, 1, 4)
+        three, binary, expanded = _profile_maps(evaluation)
+        for row, raw in enumerate(
+            sorted(set(three) | set(binary) | set(expanded)), profile_start + 2
+        ):
+            ws.cell(row, 1, raw)
+            ws.cell(row, 2, three.get(raw, "N/A"))
+            ws.cell(row, 3, binary.get(raw, "N/A"))
+            ws.cell(row, 4, expanded.get(raw, "N/A"))
     ws.column_dimensions["A"].width = 25
     ws.column_dimensions["B"].width = 70
     ws.column_dimensions["C"].width = 68
@@ -1509,8 +1522,13 @@ def _summary_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) -> Non
     ws.cell(overall_row, 6, _value(normal_metric, "support", default=0))
     matrix_row = overall_row + 3
     _write_matrix(
-        ws, matrix_row, 1, "Overall Expanded Normal scenario 3x3", THREE_LABELS, THREE_LABELS,
-        _metric_counts(overall_expanded)
+        ws,
+        matrix_row,
+        1,
+        "Overall Expanded Normal scenario 3x3",
+        THREE_LABELS,
+        THREE_LABELS,
+        _metric_counts(overall_expanded),
     )
     scenario_distribution_row = matrix_row
     _set_section(ws.cell(scenario_distribution_row, 7), "Expanded Normal class distribution")
@@ -1552,6 +1570,183 @@ def _summary_sheet(wb: Workbook, evaluation: Any, samples: Sequence[Any]) -> Non
     ws.row_breaks.append(Break(id=scenario_start - 1))
 
 
+def _single_source_sheets(
+    wb: Workbook, evaluation: Any, cancel_check: Any, *, show_map_codes: bool
+) -> None:
+    mode = evaluation.report_mode
+    samples = evaluation.sheet_evaluations
+    records = [getattr(row, mode) for sample in samples for row in sample.joined]
+    labels = sorted({record.value for record in records}, key=str.casefold)
+    defaults = MEASUREMENT_STYLES if mode == "measurement" else PREDICTION_STYLES
+    known = {_norm(label): style for label, style in defaults.items()}
+    styles = {}
+    for index, label in enumerate(labels):
+        # Custom TXT Converter labels keep their own code/color and literal label.
+        rgb = hsv_to_rgb((index + 0.5) / len(labels), 0.45, 0.90)
+        color = "".join(f"{round(channel * 255):02X}" for channel in rgb)
+        styles[label] = known.get(_norm(label), (f"U{index + 1}", color))
+
+    data = wb.create_sheet("Source_Data")
+    label_header = "Status" if mode == "measurement" else "Prediction"
+    headers = ("Name", "Row", "Node", label_header, "Source row", "Provenance", "Source")
+    if mode == "prediction":
+        headers += ("Confidence", "Review required", "P(Normal)", "P(Open)", "P(Short)")
+    data.append(headers)
+    for row_index, record in enumerate(records, 2):
+        values = (
+            record.name,
+            record.row,
+            record.node,
+            record.value,
+            record.input_row,
+            record.provenance,
+            record.source,
+        )
+        if mode == "prediction":
+            values += (
+                record.confidence,
+                record.review_required,
+                record.prob_normal,
+                record.prob_open,
+                record.prob_short,
+            )
+        data.append(values)
+        for col, value in enumerate(values, 1):
+            if isinstance(value, str):
+                data.cell(row_index, col).data_type = "s"
+    _style_header_row(data, 1, 1, len(headers))
+    data.freeze_panes = "A2"
+    data.auto_filter.ref = data.dimensions
+    for col in range(1, len(headers) + 1):
+        data.column_dimensions[get_column_letter(col)].width = 20
+    data.column_dimensions["A"].width = 60
+
+    distribution_rows = []
+    for index, sample in enumerate(samples, 1):
+        if _cancelled(cancel_check):
+            raise WorkbookCancelled("Workbook generation was cancelled")
+        sample_records = [getattr(row, mode) for row in sample.joined]
+        name = sample_records[0].name
+        counts = Counter(record.value for record in sample_records)
+        ws = wb.create_sheet(f"R{index:02d}")
+        _title(ws, f"R2R Label Map — {name}", "AT")
+        ws.merge_cells("A3:AT3")
+        ws["A3"] = f"Full sample name: {name}"
+        ws["A3"].alignment = Alignment(wrap_text=True, vertical="top")
+        ws.row_dimensions[3].height = 32
+        ws["A4"] = f"{mode.title()} only | Coordinates: {len(sample_records):,} | Grid: 26 x 38"
+        ws["A5"] = "Label distribution only; comparison results are omitted."
+        _style_map_area(ws, 8, 9, f"{mode.title()} label map")
+        ws["C8"] = "R/N"
+        _write_map(
+            ws,
+            9,
+            {record.coordinate: styles[record.value] for record in sample_records},
+            show_codes=show_map_codes,
+        )
+        for col, header in enumerate(("Label", "Code", "Count", "Share"), 43):
+            ws.cell(8, col, header)
+        _style_header_row(ws, 8, 43, 46)
+        for row, label in enumerate(labels, 9):
+            ws.cell(row, 43, label).data_type = "s"
+            ws.cell(row, 43).alignment = Alignment(wrap_text=True, vertical="center")
+            code, color = styles[label]
+            ws.cell(row, 44, code).fill = _fill(color)
+            ws.cell(row, 45, counts[label])
+            ws.cell(row, 46, counts[label] / len(sample_records)).number_format = "0.00%"
+            distribution_rows.append(
+                (name, label, counts[label], counts[label] / len(sample_records))
+            )
+        for col, width in (("AQ", 24), ("AR", 8), ("AS", 10), ("AT", 12)):
+            ws.column_dimensions[col].width = width
+        ws.sheet_view.showGridLines = False
+        ws.freeze_panes = "D9"
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.paperSize = ws.PAPERSIZE_A3
+        ws.page_setup.fitToWidth = ws.page_setup.fitToHeight = 1
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_area = f"A1:AT{max(38, 9 + len(labels))}"
+
+    summary = wb.create_sheet("Overall Summary")
+    _title(summary, f"R2R {mode.title()} Label Summary", "L")
+    summary["A2"] = f"Samples: {len(samples)} | Coordinates: {len(records):,} | Single input"
+    for col, header in enumerate(("Sample", "Label", "Count", "Share"), 1):
+        summary.cell(3, col, header)
+    _style_header_row(summary, 3, 1, 4)
+    total_counts = Counter(record.value for record in records)
+    overall = [
+        ("OVERALL", label, total_counts[label], total_counts[label] / len(records))
+        for label in labels
+    ]
+    for row, values in enumerate(overall + distribution_rows, 4):
+        for col, value in enumerate(values, 1):
+            cell = summary.cell(row, col, value)
+            if isinstance(value, str):
+                cell.data_type = "s"
+        summary.cell(row, 4).number_format = "0.00%"
+    summary.column_dimensions["A"].width = 60
+    summary.column_dimensions["B"].width = 26
+    summary.column_dimensions["C"].width = 12
+    summary.column_dimensions["D"].width = 12
+    summary.freeze_panes = "C4"
+    summary.auto_filter.ref = f"A3:D{summary.max_row}"
+    chart = BarChart()
+    chart.title = f"{mode.title()} label counts"
+    chart.title.overlay = False
+    chart.y_axis.scaling.min = 0
+    chart.y_axis.delete = chart.x_axis.delete = False
+    chart.y_axis.tickLblPos = chart.x_axis.tickLblPos = "nextTo"
+    chart.legend = None
+    chart.add_data(
+        Reference(summary, min_col=3, min_row=3, max_row=3 + len(labels)), titles_from_data=True
+    )
+    chart.set_categories(Reference(summary, min_col=2, min_row=4, max_row=3 + len(labels)))
+    for index, label in enumerate(labels):
+        point = DataPoint(idx=index)
+        point.graphicalProperties.solidFill = styles[label][1]
+        chart.series[0].data_points.append(point)
+    chart.width, chart.height = 17, 10
+    summary.add_chart(chart, "F4")
+    summary.page_setup.orientation = "landscape"
+    summary.page_setup.paperSize = summary.PAPERSIZE_A3
+    summary.page_setup.fitToWidth, summary.page_setup.fitToHeight = 1, 0
+    summary.sheet_properties.pageSetUpPr.fitToPage = True
+    summary.print_area = f"A1:O{max(26, summary.max_row)}"
+
+
+def _verify_single_source(wb: Workbook, mode: str) -> None:
+    reports = wb.sheetnames[2:-1]
+    if (
+        wb.sheetnames[:2] != ["README", "Source_Data"]
+        or wb.sheetnames[-1] != "Overall Summary"
+        or not reports
+        or reports != [f"R{index:02d}" for index in range(1, len(reports) + 1)]
+    ):
+        raise ValueError("Single-source report tabs are incomplete or out of order")
+    data = wb["Source_Data"]
+    if (
+        tuple(data.cell(1, col).value for col in range(1, 5))
+        != ("Name", "Row", "Node", "Status" if mode == "measurement" else "Prediction")
+        or data.max_row - 1 != len(reports) * ROWS * NODES
+    ):
+        raise ValueError("Single-source coordinate data is incomplete")
+    show_codes = wb["README"]["B7"].value == "Codes + fills"
+    for name in reports:
+        ws = wb[name]
+        if ws["C8"].value != "R/N" or ws["AO8"].value != NODES or ws["C34"].value != ROWS:
+            raise ValueError(f"{name}: incomplete single-source map axes")
+        if ws.page_setup.fitToHeight != 1 or ws.row_breaks.brk or ws._charts:
+            raise ValueError(
+                f"{name}: single-source map must occupy one page without comparison charts"
+            )
+        for row in ws.iter_rows(min_row=9, max_row=34, min_col=4, max_col=41):
+            for cell in row:
+                if cell.fill.patternType != "solid" or (cell.value is not None) != show_codes:
+                    raise ValueError(f"{name}: invalid map cell {cell.coordinate}")
+    if len(wb["Overall Summary"]._charts) != 1:
+        raise ValueError("Single-source summary must contain one label-distribution chart")
+
+
 def _cancelled(check: Callable[[], bool] | Any | None) -> bool:
     if check is None:
         return False
@@ -1579,6 +1774,10 @@ def verify_workbook_structure(path_or_workbook: str | Path | Workbook) -> None:
         wb = load_workbook(path_or_workbook)
         close = True
     try:
+        mode = wb["README"]["B2"].value if "README" in wb.sheetnames else None
+        if mode in ("measurement", "prediction"):
+            _verify_single_source(wb, mode)
+            return
         if wb.sheetnames[:3] != ["README", "Mapping_Audit", "Joined_Data"]:
             raise ValueError("README, Mapping_Audit, Joined_Data must be first")
         if wb.sheetnames[-1] != "Overall Summary":
@@ -1683,13 +1882,18 @@ def _render_verified(
         workbook = Workbook()
         samples = _samples(evaluation)
         _readme_sheet(workbook, evaluation, show_map_codes=show_map_codes)
-        _mapping_audit_sheet(workbook, evaluation, samples)
-        _joined_sheet(workbook, evaluation, samples)
-        for index, sample in enumerate(samples, 1):
-            if _cancelled(cancel_check):
-                raise WorkbookCancelled("Workbook generation was cancelled")
-            _report_sheet(workbook, sample, index, evaluation, show_map_codes=show_map_codes)
-        _summary_sheet(workbook, evaluation, samples)
+        if _value(evaluation, "report_mode", default="comparison") != "comparison":
+            if _value(evaluation, "blocked"):
+                raise ValueError("Cannot render a blocked single-source report")
+            _single_source_sheets(workbook, evaluation, cancel_check, show_map_codes=show_map_codes)
+        else:
+            _mapping_audit_sheet(workbook, evaluation, samples)
+            _joined_sheet(workbook, evaluation, samples)
+            for index, sample in enumerate(samples, 1):
+                if _cancelled(cancel_check):
+                    raise WorkbookCancelled("Workbook generation was cancelled")
+                _report_sheet(workbook, sample, index, evaluation, show_map_codes=show_map_codes)
+            _summary_sheet(workbook, evaluation, samples)
         if _cancelled(cancel_check):
             raise WorkbookCancelled("Workbook generation was cancelled")
         workbook.save(path)

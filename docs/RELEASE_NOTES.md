@@ -1,3 +1,15 @@
+# v0.4.0
+
+- Measurement-only and prediction-only inputs now generate 26 x 38 label maps, label counts/shares,
+  source coordinate data, and overall label-distribution charts.
+- Single-source reports omit comparison metrics, matching controls, and label-remapping controls.
+  Existing two-input comparison reports are preserved.
+- Custom measurement labels remain literal; prediction labels and complete-grid validation remain
+  strict. Prediction-only reports include all prediction samples.
+- Both code-and-color and color-only workbooks are produced. Input changes require fresh preflight,
+  and output/input path collisions are blocked.
+- Packaged/installed self-tests now exercise both single-source modes as well as comparison.
+
 # v0.3.0
 
 - Added one-operation paired export: code-and-fill workbook plus deterministic `-color-only.xlsx`.
