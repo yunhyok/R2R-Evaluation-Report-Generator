@@ -25,11 +25,18 @@ def _write_synthetic(output: Path) -> None:
 
 
 def run_self_test() -> int:
+    from .core import build_synthetic_evaluation
+    from .workbook import generate_workbook_pair
+
     with tempfile.TemporaryDirectory(prefix="r2r-evaluation-report-self-test-") as directory:
         output = Path(directory) / "synthetic-evaluation-report.xlsx"
         _write_synthetic(output)
         if output.stat().st_size <= 0:
             raise RuntimeError("Synthetic workbook is empty.")
+        for kind in ("measurement", "prediction"):
+            generate_workbook_pair(
+                Path(directory) / f"{kind}.xlsx", build_synthetic_evaluation(kind)
+            )
         print(f"{SELF_TEST_MARKER} version={__version__} workbook_bytes={output.stat().st_size}")
     return 0
 

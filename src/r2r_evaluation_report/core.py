@@ -263,6 +263,57 @@ class EvaluationResult:
     overall_yield: YieldStats | None = None
     mapping_errors: tuple[str, ...] = ()
     overall_expanded_normal: Metrics | None = None
+    report_mode: Literal["comparison", "measurement", "prediction"] = "comparison"
+
+
+def describe_dataset(dataset: ParsedDataset) -> EvaluationResult:
+    """Retain one source's labels and coordinates without manufacturing comparisons."""
+    if dataset.kind not in ("measurement", "prediction") or not dataset.sheets:
+        raise DataContractError("a non-empty measurement or prediction dataset is required")
+    unknown = tuple(
+        sorted(
+            {
+                record.value
+                for sheet in dataset.sheets
+                for record in sheet.records
+                if dataset.kind == "prediction"
+                and _normalise(record.value) not in _PREDICTION_CLASSES
+            }
+        )
+    )
+    samples = []
+    for sheet in dataset.sheets:
+        joined = tuple(
+            JoinedRecord(
+                record if dataset.kind == "measurement" else None,
+                record if dataset.kind == "prediction" else None,
+                sheet.title,
+            )
+            for record in sheet.records
+        )
+        samples.append(
+            SheetEvaluation(
+                measurement_sheet=sheet.title if dataset.kind == "measurement" else "",
+                prediction_sheet=sheet.title if dataset.kind == "prediction" else "",
+                joined=joined,
+                excluded=(),
+                raw_status_by_prediction={},
+                mapped_three_class=None,
+                operational_binary=None,
+                confidence_review=_confidence_stats(joined),
+            )
+        )
+    sources = tuple(sheet.source for sheet in dataset.sheets)
+    return EvaluationResult(
+        blocked=bool(unknown),
+        unresolved_measurement_statuses=(),
+        unknown_predictions=unknown,
+        mappings=MappingAudit((), (), (), ()),
+        sheet_evaluations=tuple(samples),
+        measurement_sources=sources if dataset.kind == "measurement" else (),
+        prediction_sources=sources if dataset.kind == "prediction" else (),
+        report_mode=dataset.kind,
+    )
 
 
 def _source_metadata(
@@ -1076,7 +1127,7 @@ def evaluate(
     )
 
 
-def build_synthetic_evaluation() -> EvaluationResult:
+def build_synthetic_evaluation(kind: DatasetKind | None = None) -> EvaluationResult:
     """Build a deterministic, contract-complete evaluation for installer smoke tests.
 
     It never reads a user file.  The generated records include every default
@@ -1128,4 +1179,8 @@ def build_synthetic_evaluation() -> EvaluationResult:
         prediction_source.path,
         (ParsedSheet("prediction", prediction_source, tuple(predictions), {}),),
     )
+    if kind is not None:
+        if kind not in ("measurement", "prediction"):
+            raise DataContractError("unknown synthetic dataset kind")
+        return describe_dataset(measured if kind == "measurement" else predicted)
     return evaluate(measured, predicted)

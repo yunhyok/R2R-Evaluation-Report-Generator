@@ -79,3 +79,22 @@ destinations are restored on cancellation, verification failure, or commit failu
 inside the short two-file commit window is an unavoidable filesystem boundary. A stale transaction
 backup blocks automatic rerun so that it cannot be silently discarded; manual recovery/removal may
 be required before retrying.
+
+## Single-source label reports (v0.4.0)
+
+Exactly one supplied input selects a descriptive measurement-only or prediction-only report.
+The existing parser still requires 988 unique coordinates per sample. All supplied samples are
+included; missing reference data is not synthesized and no sample matching or label remapping is
+performed. Measurement labels, including custom TXT Converter rule outputs, are preserved literally.
+Prediction labels retain the Normal/Open/Short validation contract.
+
+Each sample has one 26 x 38 map, a code/color legend, and label counts/shares. Shares use that
+sample's coordinate count; overall shares use all supplied coordinates, without averaging sample
+percentages. The overall count chart starts at zero and uses the map colors. Source_Data retains
+original labels, coordinates, source-row/provenance fields and available prediction confidences.
+No F1, accuracy, confusion matrix, agreement, or Expanded Normal comparison is calculated.
+
+The code-and-fill and color-only workbooks share the existing verified pair-commit and rollback
+path; only D9:AO34 in each single-source report is cleared in the color-only copy. README records
+the input kind and why comparison results are absent. Switching inputs or source worksheets
+requires a fresh preflight; output paths cannot replace either source input.

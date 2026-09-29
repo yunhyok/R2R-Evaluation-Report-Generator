@@ -1,3 +1,35 @@
+# Stable release validation — v0.4.0
+
+Validation date: 2026-09-30 (Asia/Seoul).
+
+- Ruff passed; the full pytest suite passed **52 tests**. After the final chart/UI adjustments,
+  the affected GUI and single-source tests passed **16 tests**.
+- CSV and XLSX checks covered measurement-only and prediction-only input, custom literal
+  measurement labels, all supplied samples, missing coordinates, unknown predictions, stale
+  worksheet selection, input/output collisions, and switching between single/paired input.
+- Source self-test and the final frozen executable checks passed. Self-test now exports and
+  verifies comparison, measurement-only, and prediction-only workbook pairs.
+- Both single-source UI screens passed offscreen captures at DPR 1.0, 1.25, and 1.5. Generated
+  maps and summaries for both display variants were exported read-only through native Excel:
+  all eight checked PDFs were one A3 landscape page; map and summary renders were inspected.
+- The final disposable installer passed fresh install, installed self-test, synthetic export,
+  offscreen GUI smoke, same-installer upgrade, post-upgrade self-test, and uninstall at each
+  scale factor 1.0, 1.25, and 1.5. Installation roots and uninstall entries were removed.
+- The production installation was preserved. This release's new acceptance checks use synthetic
+  inputs and offscreen UI; real research data and a visible installed user workflow were not rerun.
+- The final executable archive contains 218 entries and no research-data, model-weight, or
+  private-key file extensions. Source-only and staged-secret checks run before publication.
+- Runtime dependencies and the proprietary license remain unchanged; installers are unsigned.
+
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| Frozen EXE | 61,154,073 | `81745F1E41A93B73D5EDC1D3E9826DBBBE4B4484D0F8AB88C504A5C4525154E4` |
+| Production installer | 62,384,121 | `3D70C4C213F03529B4913A9A98A2A0ABFCD8BCD3CCCBAE0937EB2657B49C4149` |
+| Disposable installer | 62,384,141 | `B411B6B6E6B8C80069829A94F138FF15AC378807AC62177264D84A20A7F1EF85` |
+
+Publication status is recorded in the
+[v0.4.0 release](https://github.com/yunhyok/R2R-Evaluation-Report-Generator/releases/tag/v0.4.0).
+
 # Stable release validation — v0.3.0
 
 Validation date: 2026-09-30 (Asia/Seoul).
