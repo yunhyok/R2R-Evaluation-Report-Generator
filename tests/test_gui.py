@@ -13,6 +13,7 @@ from r2r_evaluation_report.gui import (
     OperationCancelled,
     WorkflowContext,
 )
+from r2r_evaluation_report.workbook import derive_color_only_path
 from scripts.create_synthetic_inputs import create_inputs
 
 
@@ -57,7 +58,9 @@ class FakeAdapter:
         if self.fail:
             raise RuntimeError("통합문서를 저장할 수 없습니다. 파일 권한을 확인하세요.")
         Path(context.output_path).write_bytes(b"fake xlsx")
-        return {"output_path": context.output_path}
+        color_only = derive_color_only_path(context.output_path)
+        color_only.write_bytes(b"fake color-only xlsx")
+        return {"output_path": context.output_path, "color_only_path": str(color_only)}
 
 
 def _make_files(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -87,6 +90,8 @@ def test_initial_state(qtbot) -> None:
     assert not window.cancel_button.isEnabled()
     assert not window.sheet_box.isVisible()
     assert window.measurement_edit.accessibleName() == "측정 CSV 또는 XLSX 파일"
+    assert window.color_only_preview.accessibleName() == "색상 전용 파생 출력 경로 미리보기"
+    assert window.preflight_button.geometry().top() >= window.output_preview.geometry().bottom()
 
 
 def test_path_validation_reports_recovery(qtbot, tmp_path: Path) -> None:
@@ -159,7 +164,10 @@ def test_working_controls_cancel_and_success_state(qtbot, tmp_path: Path) -> Non
     assert window._thread.wait(3000)
     qtbot.waitUntil(lambda: window.open_workbook_button.isVisible(), timeout=3000)
     assert output.is_file()
+    assert derive_color_only_path(output).is_file()
     assert window._last_output_path == str(output)
+    assert window._last_color_only_path == str(derive_color_only_path(output))
+    assert window.open_color_only_button.isVisible()
     assert window.open_folder_button.isVisible()
 
     window.output_edit.setText(str(tmp_path / "다른 결과.xlsx"))
@@ -236,4 +244,5 @@ def test_real_adapter_handles_multi_name_mapping_and_binary_rules(tmp_path: Path
         replace(context, mappings=approved, label_rules=result["label_rules"])
     )
     assert generated["output_path"] == str(output)
+    assert Path(generated["color_only_path"]).is_file()
     assert output.is_file()

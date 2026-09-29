@@ -66,3 +66,16 @@ the hashed source file rather than being copied into the report.
 Expanded Normal is an additional image-observability/reporting assumption, not relabeling of the
 electrical ground truth. It maps No Gate Effect to Normal and keeps Short as Short; source and
 existing three-class/binary results remain authoritative.
+
+## Paired workbook display contract (v0.3.0)
+
+The GUI performs one evaluation and renders two candidates: the selected output path retains the
+backward-compatible code-and-fill workbook, while a deterministic `<stem>-color-only.xlsx` sibling
+contains the same workbook with only the four 26 × 38 map body ranges (`D9:AO34`, `D44:AO69`,
+`D79:AO104`, `D114:AO139`) blank. Fills, borders, dimensions, axes, legends, matrices, charts,
+tables, audit data, and non-map content are not display-mode transforms and remain present. Both
+candidates are reopened and structurally verified before either destination is committed. Existing
+destinations are restored on cancellation, verification failure, or commit failure; a process crash
+inside the short two-file commit window is an unavoidable filesystem boundary. A stale transaction
+backup blocks automatic rerun so that it cannot be silently discarded; manual recovery/removal may
+be required before retrying.

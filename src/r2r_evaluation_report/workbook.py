@@ -80,6 +80,14 @@ class WorkbookCancelled(RuntimeError):
     """Raised without replacing an existing output when export is cancelled."""
 
 
+def derive_color_only_path(output_path: str | Path) -> Path:
+    """Return the deterministic sibling used for the fills-only workbook."""
+    output = Path(output_path)
+    suffix = ".xlsx" if output.suffix.lower() == ".xlsx" else output.suffix or ".xlsx"
+    stem = output.stem if output.suffix else output.name
+    return output.with_name(f"{stem}-color-only{suffix}")
+
+
 def _value(item: Any, *names: str, default: Any = None) -> Any:
     for name in names:
         if isinstance(item, Mapping) and name in item:
@@ -414,10 +422,12 @@ def _write_map(
     ws: Any,
     body_row: int,
     values: Mapping[tuple[int, int], tuple[str, str]],
+    *,
+    show_codes: bool = True,
 ) -> None:
     for (row_index, node_index), (code, color) in values.items():
         cell = ws.cell(body_row + row_index - 1, 3 + node_index)
-        cell.value = code
+        cell.value = code if show_codes else None
         cell.fill = _fill(color)
         cell.font = Font(size=7, bold=True)
 
@@ -957,6 +967,8 @@ def _report_sheet(
     sample: Any,
     index: int,
     evaluation: Any,
+    *,
+    show_map_codes: bool = True,
 ) -> Any:
     ws = wb.create_sheet(f"R{index:02d}")
     rows = _records(sample)
@@ -987,10 +999,10 @@ def _report_sheet(
         agreement_values[coordinate] = AGREEMENT_STYLES.get(agreement, UNKNOWN_STYLE)
         expanded_actual = _expanded_actual(row, evaluation)
         expanded_values[coordinate] = PREDICTION_STYLES.get(expanded_actual, UNKNOWN_STYLE)
-    _write_map(ws, 9, measurement_values)
-    _write_map(ws, 44, prediction_values)
-    _write_map(ws, 79, agreement_values)
-    _write_map(ws, 114, expanded_values)
+    _write_map(ws, 9, measurement_values, show_codes=show_map_codes)
+    _write_map(ws, 44, prediction_values, show_codes=show_map_codes)
+    _write_map(ws, 79, agreement_values, show_codes=show_map_codes)
+    _write_map(ws, 114, expanded_values, show_codes=show_map_codes)
     _write_report_panel(ws, sample, rows, evaluation)
     ws.sheet_view.showGridLines = False
     ws.page_setup.orientation = "landscape"
@@ -1033,7 +1045,12 @@ def _source_rows(evaluation: Any) -> list[tuple[str, Any]]:
     return rows
 
 
-def _readme_sheet(wb: Workbook, evaluation: Any) -> None:
+def _readme_sheet(
+    wb: Workbook,
+    evaluation: Any,
+    *,
+    show_map_codes: bool = True,
+) -> None:
     ws = wb.active
     ws.title = "README"
     _title(ws, "R2R Evaluation Workbook — operational and provenance record", "J")
@@ -1063,6 +1080,13 @@ def _readme_sheet(wb: Workbook, evaluation: Any) -> None:
     for row, (label, value) in enumerate(notes, 3):
         ws.cell(row, 1, label).font = Font(bold=True)
         ws.cell(row, 2, value).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.cell(7, 1, "Map display mode").font = Font(bold=True)
+    display_mode = (
+        "Codes + fills"
+        if show_map_codes
+        else "Color fills only; map body codes intentionally blank"
+    )
+    ws.cell(7, 2, display_mode)
     source_start = 8
     ws.cell(source_start, 1, "Source provenance")
     _set_section(ws.cell(source_start, 1), "Source provenance")
@@ -1644,6 +1668,41 @@ def verify_workbook(path: str | Path) -> None:
     verify_workbook_structure(path)
 
 
+def _render_verified(
+    path: Path,
+    evaluation: Any,
+    cancel_check: Callable[[], bool] | Any | None,
+    *,
+    show_map_codes: bool,
+) -> None:
+    """Render one candidate to ``path`` and verify it before any commit."""
+    workbook: Workbook | None = None
+    try:
+        if _cancelled(cancel_check):
+            raise WorkbookCancelled("Workbook generation was cancelled")
+        workbook = Workbook()
+        samples = _samples(evaluation)
+        _readme_sheet(workbook, evaluation, show_map_codes=show_map_codes)
+        _mapping_audit_sheet(workbook, evaluation, samples)
+        _joined_sheet(workbook, evaluation, samples)
+        for index, sample in enumerate(samples, 1):
+            if _cancelled(cancel_check):
+                raise WorkbookCancelled("Workbook generation was cancelled")
+            _report_sheet(workbook, sample, index, evaluation, show_map_codes=show_map_codes)
+        _summary_sheet(workbook, evaluation, samples)
+        if _cancelled(cancel_check):
+            raise WorkbookCancelled("Workbook generation was cancelled")
+        workbook.save(path)
+        workbook.close()
+        workbook = None
+        verify_workbook_structure(path)
+        if _cancelled(cancel_check):
+            raise WorkbookCancelled("Workbook generation was cancelled")
+    finally:
+        if workbook is not None:
+            workbook.close()
+
+
 def generate_workbook(
     output_path: str | Path | Any,
     evaluation: Any | str | Path,
@@ -1659,33 +1718,101 @@ def generate_workbook(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_name(f".{output.stem}.partial.xlsx")
-    workbook: Workbook | None = None
     try:
         partial.unlink(missing_ok=True)
-        if _cancelled(cancel_check):
-            raise WorkbookCancelled("Workbook generation was cancelled")
-        workbook = Workbook()
-        samples = _samples(evaluation)
-        _readme_sheet(workbook, evaluation)
-        _mapping_audit_sheet(workbook, evaluation, samples)
-        _joined_sheet(workbook, evaluation, samples)
-        for index, sample in enumerate(samples, 1):
-            if _cancelled(cancel_check):
-                raise WorkbookCancelled("Workbook generation was cancelled")
-            _report_sheet(workbook, sample, index, evaluation)
-        _summary_sheet(workbook, evaluation, samples)
-        if _cancelled(cancel_check):
-            raise WorkbookCancelled("Workbook generation was cancelled")
-        workbook.save(partial)
-        workbook.close()
-        workbook = None
-        verify_workbook_structure(partial)
-        if _cancelled(cancel_check):
-            raise WorkbookCancelled("Workbook generation was cancelled")
+        _render_verified(partial, evaluation, cancel_check, show_map_codes=True)
         os.replace(partial, output)
         return output
     except BaseException:
-        if workbook is not None:
-            workbook.close()
         partial.unlink(missing_ok=True)
+        raise
+
+
+def _restore_destination(destination: Path, backup: Path, existed: bool) -> None:
+    if existed:
+        if backup.exists():
+            os.replace(backup, destination)
+    else:
+        destination.unlink(missing_ok=True)
+
+
+def generate_workbook_pair(
+    output_path: str | Path,
+    evaluation: Any,
+    cancel_check: Callable[[], bool] | Any | None = None,
+) -> tuple[Path, Path]:
+    """Generate, verify, and transactionally commit text and fills-only workbooks.
+
+    Both candidates are rendered and reopened before either destination is
+    changed. If cancellation or a commit error occurs, existing destinations
+    are restored and temporary partial/backup files are removed. A process
+    crash during the tiny commit window remains an unavoidable filesystem
+    boundary; a stale transaction backup blocks automatic rerun and may require
+    manual recovery.
+    """
+    output = Path(output_path)
+    color_only = derive_color_only_path(output)
+    if output.resolve() == color_only.resolve():
+        raise ValueError("With-text and color-only output paths must differ")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    color_only.parent.mkdir(parents=True, exist_ok=True)
+    partials = (
+        output.with_name(f".{output.stem}.partial.xlsx"),
+        color_only.with_name(f".{color_only.stem}.partial.xlsx"),
+    )
+    backups = (
+        output.with_name(f".{output.stem}.backup.xlsx"),
+        color_only.with_name(f".{color_only.stem}.backup.xlsx"),
+    )
+    destinations = (output, color_only)
+    existed = tuple(path.exists() for path in destinations)
+    committed = [False, False]
+    committed_all = False
+    created_backups: set[Path] = set()
+    try:
+        for path in partials:
+            path.unlink(missing_ok=True)
+        stale_backups = [path for path in backups if path.exists()]
+        if stale_backups:
+            names = ", ".join(str(path) for path in stale_backups)
+            raise RuntimeError(
+                f"Stale transaction backup exists; recover or remove it first: {names}"
+            )
+        _render_verified(partials[0], evaluation, cancel_check, show_map_codes=True)
+        _render_verified(partials[1], evaluation, cancel_check, show_map_codes=False)
+        if _cancelled(cancel_check):
+            raise WorkbookCancelled("Workbook generation was cancelled")
+        for index, destination in enumerate(destinations):
+            if existed[index]:
+                os.replace(destination, backups[index])
+                created_backups.add(backups[index])
+            try:
+                os.replace(partials[index], destination)
+            except BaseException:
+                _restore_destination(destination, backups[index], existed[index])
+                raise
+            committed[index] = True
+        committed_all = True
+        for backup in created_backups:
+            try:
+                backup.unlink(missing_ok=True)
+            except Exception:
+                # The pair is committed; a locked backup is recoverable and
+                # must not trigger rollback after both destinations changed.
+                pass
+        return destinations
+    except BaseException:
+        if not committed_all:
+            for index in reversed(range(2)):
+                if committed[index]:
+                    _restore_destination(destinations[index], backups[index], existed[index])
+                elif existed[index] and backups[index] in created_backups:
+                    _restore_destination(destinations[index], backups[index], True)
+        for path in partials:
+            path.unlink(missing_ok=True)
+        for backup in created_backups:
+            try:
+                backup.unlink(missing_ok=True)
+            except Exception:
+                pass
         raise

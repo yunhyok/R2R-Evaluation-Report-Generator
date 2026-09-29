@@ -1,3 +1,15 @@
+# v0.3.0
+
+- Added one-operation paired export: code-and-fill workbook plus deterministic `-color-only.xlsx`.
+- Added two-candidate verification and rollback-safe dual-destination commit for GUI generation.
+- GUI now previews both paths, confirms all existing destinations together, and exposes separate
+  open buttons for each workbook and the containing folder.
+- Version/installer metadata bumped to 0.3.0. Source, real-data, packaged, installed, paired-output,
+  and installer lifecycle validation passed on 2026-08-26; see `docs/VALIDATION.md`.
+- Stable release preparation includes a fresh source/installer validation on 2026-09-30;
+  see `docs/VALIDATION.md`. Installers remain unsigned, so Windows SmartScreen reputation warnings
+  are possible. Repository visibility does not change the terms in `LICENSE`.
+
 # v0.2.0-rc.1
 
 - Added auditable Expanded Normal scenario analysis, mapping No Gate Effect to Normal while keeping Short separate.

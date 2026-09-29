@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -19,7 +20,9 @@ from r2r_evaluation_report.workbook import (
     MEASUREMENT_STYLES,
     PREDICTION_STYLES,
     WorkbookCancelled,
+    derive_color_only_path,
     generate_workbook,
+    generate_workbook_pair,
     verify_workbook,
 )
 
@@ -396,3 +399,115 @@ def test_atomic_overwrite_cancel_error_cleanup_and_reopen(tmp_path, monkeypatch)
     reopened = load_workbook(output)
     assert reopened.sheetnames[-1] == "Overall Summary"
     reopened.close()
+
+
+def test_pair_generation_preserves_map_fills_and_blanks_only_body_codes(tmp_path):
+    evaluation = build_synthetic_evaluation()
+    output = tmp_path / "긴 한글 결과" / "평가.xlsx"
+    output.parent.mkdir()
+    text_path, color_path = generate_workbook_pair(output, evaluation)
+    assert text_path == output
+    assert color_path == derive_color_only_path(output)
+    text_wb = load_workbook(text_path)
+    color_wb = load_workbook(color_path)
+    try:
+        assert text_wb.sheetnames == color_wb.sheetnames
+        for name in text_wb.sheetnames:
+            if name.startswith("R") and name[1:].isdigit():
+                text_ws, color_ws = text_wb[name], color_wb[name]
+                body_ranges = {
+                    (row, col)
+                    for body in (9, 44, 79, 114)
+                    for row in range(body, body + 26)
+                    for col in range(4, 42)
+                }
+                for row in range(1, max(text_ws.max_row, color_ws.max_row) + 1):
+                    for col in range(1, max(text_ws.max_column, color_ws.max_column) + 1):
+                        if (row, col) not in body_ranges:
+                            assert color_ws.cell(row, col).value == text_ws.cell(row, col).value
+                        assert repr(color_ws.cell(row, col).fill) == repr(
+                            text_ws.cell(row, col).fill
+                        )
+                        assert repr(color_ws.cell(row, col).border) == repr(
+                            text_ws.cell(row, col).border
+                        )
+                for body in (9, 44, 79, 114):
+                    for row in range(body, body + 26):
+                        for col in range(4, 42):
+                            assert color_ws.cell(row, col).value is None
+                            assert color_ws.cell(row, col).fill.fgColor.rgb == text_ws.cell(
+                                row, col
+                            ).fill.fgColor.rgb
+                assert color_ws["A1"].value == text_ws["A1"].value
+                assert color_ws["D4"].value == text_ws["D4"].value
+                assert color_ws["AZ4"].value == text_ws["AZ4"].value == "Measurement legend"
+                assert color_ws["AZ43"].value == text_ws["AZ43"].value == "Prediction legend"
+                assert color_ws["BH76"].value == text_ws["BH76"].value == "Agreement legend"
+                assert color_ws["BH113"].value == text_ws["BH113"].value == "Expanded Normal legend"
+        assert text_wb["README"]["B7"].value == "Codes + fills"
+        assert "Color fills only" in color_wb["README"]["B7"].value
+    finally:
+        text_wb.close()
+        color_wb.close()
+
+
+def test_pair_cancel_keeps_both_existing_outputs_and_cleans_temps(tmp_path):
+    evaluation = build_synthetic_evaluation()
+    output = tmp_path / "atomic.xlsx"
+    color = derive_color_only_path(output)
+    output.write_bytes(b"old text")
+    color.write_bytes(b"old color")
+    with pytest.raises(WorkbookCancelled):
+        generate_workbook_pair(output, evaluation, cancel_check=lambda: True)
+    assert output.read_bytes() == b"old text"
+    assert color.read_bytes() == b"old color"
+    assert not list(tmp_path.glob(".*partial.xlsx"))
+    assert not list(tmp_path.glob(".*backup.xlsx"))
+
+
+def test_derive_color_only_path_normalizes_xlsx_and_adds_missing_suffix():
+    assert derive_color_only_path(Path("C:/긴 경로/평가.XLSX")) == Path(
+        "C:/긴 경로/평가-color-only.xlsx"
+    )
+    assert derive_color_only_path(Path("C:/긴 경로/평가")) == Path(
+        "C:/긴 경로/평가-color-only.xlsx"
+    )
+
+
+def test_pair_stale_backup_guard_preserves_recoverable_backup(tmp_path):
+    evaluation = build_synthetic_evaluation()
+    output = tmp_path / "atomic.xlsx"
+    backup = tmp_path / ".atomic.backup.xlsx"
+    output.write_bytes(b"existing")
+    backup.write_bytes(b"recoverable")
+    with pytest.raises(RuntimeError, match="Stale transaction backup"):
+        generate_workbook_pair(output, evaluation)
+    assert output.read_bytes() == b"existing"
+    assert backup.read_bytes() == b"recoverable"
+    assert not list(tmp_path.glob(".*partial.xlsx"))
+
+
+@pytest.mark.parametrize("color_preexisting", [False, True])
+def test_pair_second_commit_failure_rolls_back_existing_and_missing_outputs(
+    tmp_path, monkeypatch, color_preexisting
+):
+    evaluation = build_synthetic_evaluation()
+    output = tmp_path / "atomic.xlsx"
+    color = derive_color_only_path(output)
+    output.write_bytes(b"old text")
+    if color_preexisting:
+        color.write_bytes(b"old color")
+    original_replace = workbook_module.os.replace
+
+    def fail_color_commit(source, destination):
+        if Path(destination) == color and ".partial" in Path(source).name:
+            raise OSError("forced second commit failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(workbook_module.os, "replace", fail_color_commit)
+    with pytest.raises(OSError, match="second commit"):
+        generate_workbook_pair(output, evaluation)
+    assert output.read_bytes() == b"old text"
+    assert color.read_bytes() == b"old color" if color_preexisting else not color.exists()
+    assert not list(tmp_path.glob(".*partial.xlsx"))
+    assert not list(tmp_path.glob(".*backup.xlsx"))

@@ -38,3 +38,14 @@ def test_repository_contract_excludes_data_and_binaries() -> None:
     for pattern in ("/*.xlsx", "/*.csv", "/build/", "/dist/"):
         assert pattern in ignore
     assert "All Rights Reserved" in (ROOT / "LICENSE").read_text(encoding="utf-8")
+
+
+def test_installed_actual_ui_verifier_is_disposable_and_pair_aware() -> None:
+    script = (ROOT / "scripts" / "verify_installed_actual_ui.ps1").read_text(encoding="utf-8")
+    assert "2E42973D-7A33-4CF3-91FD-7A4C62ACCC4F" in script
+    assert "R2REvaluationReportGenerator-Verification-" in script
+    assert "verify_actual_ui.ps1" in script
+    assert "-color-only.xlsx" in script
+    assert "0.6666667" in script and "0.8333333" in script and "Factor = '1'" in script
+    assert "QT_QPA_PLATFORM = 'offscreen'" in script
+    assert "INSTALLED_ACTUAL_UI_OK" in script

@@ -1,4 +1,4 @@
-"""Reproduce the v0.2.0 acceptance vectors from the designated research inputs."""
+"""Reproduce the historical acceptance vectors plus v0.3.0 paired outputs."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from r2r_evaluation_report.core import evaluate, parse_dataset, preflight
-from r2r_evaluation_report.workbook import generate_workbook, verify_workbook
+from r2r_evaluation_report.workbook import generate_workbook_pair, verify_workbook
 
 EXPECTED_THREE = ((8806, 193, 37), (0, 0, 0), (0, 0, 0))
 EXPECTED_BINARY = ((5117, 178), (4359, 226))
@@ -83,10 +83,12 @@ def main() -> int:
     fail = next(item for item in result.overall_binary.per_class if item.label == "Fail")
     _close(fail.recall, 0.049291166848418756)
     _close(fail.f1, 0.09059931850070155)
-    generate_workbook(args.output, result)
+    _, color_only = generate_workbook_pair(args.output, result)
     verify_workbook(args.output)
+    verify_workbook(color_only)
     evidence = {
         "output": str(args.output.resolve()),
+        "color_only_output": str(color_only.resolve()),
         "measurement_sha256": result.measurement_sources[0].sha256,
         "prediction_sha256": result.prediction_sources[0].sha256,
         "measurement_samples": len(measurement.sheets),

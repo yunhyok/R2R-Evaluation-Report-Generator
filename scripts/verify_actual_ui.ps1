@@ -15,6 +15,9 @@ $executable = [IO.Path]::GetFullPath($ExecutablePath)
 $measurement = [IO.Path]::GetFullPath($MeasurementPath)
 $prediction = [IO.Path]::GetFullPath($PredictionPath)
 $output = [IO.Path]::GetFullPath($OutputPath)
+$colorOnly = Join-Path ([IO.Path]::GetDirectoryName($output)) (
+    [IO.Path]::GetFileNameWithoutExtension($output) + '-color-only.xlsx'
+)
 if ([IO.Path]::GetExtension($output) -ne '.xlsx') { throw 'OutputPath must end in .xlsx.' }
 if (-not (Test-Path -LiteralPath (Split-Path -Parent $output) -PathType Container)) {
     throw 'OutputPath parent directory does not exist.'
@@ -106,12 +109,24 @@ try {
         return $null
     } 'the generated real-data workbook' | Out-Null
     Wait-ForValue {
+        if (Test-Path -LiteralPath $colorOnly -PathType Leaf) {
+            $file = Get-Item -LiteralPath $colorOnly
+            if ($file.Length -gt 0) { return $file }
+        }
+        return $null
+    } 'the generated color-only workbook' | Out-Null
+    Wait-ForValue {
         $button = Find-ByName $window '생성된 통합문서 열기'
         if ($null -ne $button -and -not $button.Current.IsOffscreen) { return $button }
         return $null
     } 'the successful output controls' | Out-Null
+    Wait-ForValue {
+        $button = Find-ByName $window '생성된 색상 전용 통합문서 열기'
+        if ($null -ne $button -and -not $button.Current.IsOffscreen) { return $button }
+        return $null
+    } 'the color-only output control' | Out-Null
 
-    Write-Output "ACTUAL_UI_WORKFLOW_OK output=$output"
+    Write-Output "ACTUAL_UI_WORKFLOW_OK output=$output color_only=$colorOnly"
 }
 catch {
     if ($null -ne $windowProcess) {

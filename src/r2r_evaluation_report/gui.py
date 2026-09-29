@@ -39,6 +39,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .workbook import derive_color_only_path
+
 ALLOWED_INPUT_SUFFIXES = {".csv", ".xlsx"}
 LABEL_CHOICES = ("Normal", "Open", "Short", "Exclude")
 BINARY_CHOICES = ("선택 필요", "Pass", "Fail")
@@ -262,12 +264,13 @@ class CoreWorkflowAdapter:
         if context.cancel_event.is_set():
             raise OperationCancelled()
         context.progress(55, "감사 가능한 Excel 통합문서를 작성하는 중…")
-        output = workbook.generate_workbook(
+        output, color_only = workbook.generate_workbook_pair(
             context.output_path, evaluation, cancel_check=context.cancel_event
         )
         context.progress(95, "통합문서 구조를 검증하는 중…")
         workbook.verify_workbook(output)
-        return {"output_path": str(output)}
+        workbook.verify_workbook(color_only)
+        return {"output_path": str(output), "color_only_path": str(color_only)}
 
 
 class WorkflowWorker(QThread):
@@ -344,6 +347,7 @@ class MainWindow(QMainWindow):
         self._unresolved_labels: list[str] = []
         self._unmatched_measurements: list[str] = []
         self._last_output_path: str | None = None
+        self._last_color_only_path: str | None = None
         self._file_buttons: list[QPushButton] = []
         self._build_ui()
         self._connect_signals()
@@ -390,9 +394,15 @@ class MainWindow(QMainWindow):
             self._choose_output,
             save=True,
         )
+        color_only_label = QLabel("색상 전용 파생 경로")
+        self.color_only_preview = PathPreviewLabel()
+        self.color_only_preview.setAccessibleName("색상 전용 파생 출력 경로 미리보기")
+        self.color_only_preview.setToolTip("출력 통합문서와 함께 생성되는 색상 전용 파일")
+        input_layout.addWidget(color_only_label, 6, 0)
+        input_layout.addWidget(self.color_only_preview, 6, 1)
         self.preflight_button = QPushButton("사전 검사")
         self.preflight_button.setAccessibleName("사전 검사 실행")
-        input_layout.addWidget(self.preflight_button, 3, 2)
+        input_layout.addWidget(self.preflight_button, 6, 2)
         root.addWidget(input_box)
 
         self.sheet_box = QGroupBox("2. XLSX 시트 선택")
@@ -479,16 +489,25 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("준비됨")
         self.status_label.setAccessibleName("작업 상태")
         root.addWidget(self.status_label)
+        self.output_result_label = QLabel("")
+        self.output_result_label.setWordWrap(True)
+        self.output_result_label.setAccessibleName("생성된 두 통합문서 경로")
+        self.output_result_label.setStyleSheet("color: #2d5f3f;")
+        root.addWidget(self.output_result_label)
         result_buttons = QHBoxLayout()
         result_buttons.addStretch(1)
-        self.open_workbook_button = QPushButton("통합문서 열기")
-        self.open_folder_button = QPushButton("폴더 열기")
+        self.open_workbook_button = QPushButton("코드 포함 통합문서 열기")
+        self.open_color_only_button = QPushButton("색상 전용 통합문서 열기")
+        self.open_folder_button = QPushButton("출력 폴더 열기")
         self.open_workbook_button.setAccessibleName("생성된 통합문서 열기")
+        self.open_color_only_button.setAccessibleName("생성된 색상 전용 통합문서 열기")
         self.open_folder_button.setAccessibleName("출력 폴더 열기")
         result_buttons.addWidget(self.open_workbook_button)
+        result_buttons.addWidget(self.open_color_only_button)
         result_buttons.addWidget(self.open_folder_button)
         root.addLayout(result_buttons)
         self.open_workbook_button.hide()
+        self.open_color_only_button.hide()
         self.open_folder_button.hide()
         self.cancel_button.setEnabled(False)
 
@@ -527,6 +546,7 @@ class MainWindow(QMainWindow):
         self.generate_button.clicked.connect(self.start_generation)
         self.cancel_button.clicked.connect(self.cancel_current_operation)
         self.open_workbook_button.clicked.connect(self.open_workbook)
+        self.open_color_only_button.clicked.connect(self.open_color_only_workbook)
         self.open_folder_button.clicked.connect(self.open_folder)
         self.measurement_sheet_combo.currentIndexChanged.connect(self._refresh_generate_state)
         self.prediction_sheet_combo.currentIndexChanged.connect(self._refresh_generate_state)
@@ -556,10 +576,13 @@ class MainWindow(QMainWindow):
         self.measurement_preview.set_path(self.measurement_edit.text())
         self.prediction_preview.set_path(self.prediction_edit.text())
         self.output_preview.set_path(self.output_edit.text())
+        output = self.output_edit.text().strip()
+        self.color_only_preview.set_path(str(derive_color_only_path(output)) if output else "")
         self._mapping_rows.clear()
         self._unresolved_labels.clear()
         self._unmatched_measurements.clear()
         self._last_output_path = None
+        self._last_color_only_path = None
         self.mapping_table.setRowCount(0)
         self.confirm_all_mappings_button.setEnabled(False)
         self.label_table.setRowCount(0)
@@ -567,7 +590,9 @@ class MainWindow(QMainWindow):
         self.prediction_only_label.clear()
         self.unmatched_measurement_label.clear()
         self.unresolved_label.clear()
+        self.output_result_label.clear()
         self.open_workbook_button.hide()
+        self.open_color_only_button.hide()
         self.open_folder_button.hide()
         self._refresh_generate_state()
 
@@ -607,11 +632,13 @@ class MainWindow(QMainWindow):
             self._show_error("사전 검사 결과의 매핑과 모든 라벨 규칙을 먼저 확인하세요.")
             return
         output = Path(self.output_edit.text())
-        if output.exists() and not self.test_mode:
+        color_only = derive_color_only_path(output)
+        existing = [path for path in (output, color_only) if path.exists()]
+        if existing and not self.test_mode:
             answer = QMessageBox.question(
                 self,
                 "기존 파일 덮어쓰기",
-                f"다음 파일을 덮어쓸까요?\n{output}",
+                "다음 파일을 덮어쓸까요?\n" + "\n".join(map(str, existing)),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -646,7 +673,10 @@ class MainWindow(QMainWindow):
             self.status_label.setText("이전 작업을 정리하는 중입니다. 잠시 후 다시 시도하세요.")
             return
         self.cancel_event = Event()
-        self._set_working(True, "사전 검사 중…" if operation == "preflight" else "Excel 생성 중…")
+        self._set_working(
+            True,
+            "사전 검사 중…" if operation == "preflight" else "두 Excel 통합문서 생성 중…",
+        )
         self._thread = WorkflowWorker(self.adapter, operation, self._make_context())
         self._worker = self._thread
         self._worker.progress.connect(self._update_progress, Qt.QueuedConnection)
@@ -674,7 +704,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(
             "사전 검사가 완료되었습니다."
             if operation == "preflight"
-            else "Excel 통합문서를 생성했습니다."
+            else "코드 포함·색상 전용 두 Excel 통합문서를 생성했습니다."
         )
         if operation == "preflight":
             self._apply_preflight(result if isinstance(result, dict) else {})
@@ -682,8 +712,22 @@ class MainWindow(QMainWindow):
             output_path = (
                 result.get("output_path") if isinstance(result, dict) else self.output_edit.text()
             )
+            color_only_path = (
+                result.get("color_only_path")
+                if isinstance(result, dict)
+                else str(derive_color_only_path(output_path or self.output_edit.text()))
+            )
             self._last_output_path = str(output_path or self.output_edit.text())
+            self._last_color_only_path = str(
+                color_only_path or derive_color_only_path(self._last_output_path)
+            )
+            self.output_result_label.setText(
+                "생성 완료:\n"
+                f"코드 포함: {self._last_output_path}\n"
+                f"색상 전용: {self._last_color_only_path}"
+            )
             self.open_workbook_button.show()
+            self.open_color_only_button.show()
             self.open_folder_button.show()
 
     @Slot(str, str)
@@ -938,6 +982,12 @@ class MainWindow(QMainWindow):
             self._show_error("마지막으로 생성한 통합문서를 찾을 수 없습니다.")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_output_path))
+
+    def open_color_only_workbook(self) -> None:
+        if not self._last_color_only_path or not Path(self._last_color_only_path).is_file():
+            self._show_error("색상 전용 통합문서를 찾을 수 없습니다.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self._last_color_only_path))
 
     def open_folder(self) -> None:
         if not self._last_output_path:

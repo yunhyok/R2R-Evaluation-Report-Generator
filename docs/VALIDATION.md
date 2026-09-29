@@ -1,4 +1,89 @@
-# Validation record — v0.2.0-rc.1
+# Stable release validation — v0.3.0
+
+Validation date: 2026-09-30 (Asia/Seoul).
+
+- Ruff passed; pytest **43 passed**; source self-test passed at version 0.3.0.
+- Source-only guard passed. Gitleaks found no secrets in all existing Git history or the
+  candidate source snapshot. Research inputs and generated workbooks remain outside Git.
+- A fresh PyInstaller build passed packaged self-test and offscreen GUI smoke. Its archive
+  contained 218 entries, with no research-data, model-weight, or private-key file extensions.
+- Fresh production and disposable installers were compiled from the tested source. The disposable
+  installer passed fresh install, installed self-test, synthetic workbook export, offscreen GUI
+  smoke, same-installer upgrade, post-upgrade self-test, and uninstall. The disposable executable,
+  installation directory, and uninstall registry entries were removed successfully.
+- The already-running production installation was preserved.
+- The real-research-data, visible UI, and multi-DPI acceptance checks dated 2026-08-26 below are
+  historical evidence; they were not repeated for this publication. No application source was
+  changed after the 43-test run and before the fresh build.
+- Installers remain unsigned. Public repository visibility does not change `LICENSE`.
+
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| Frozen EXE | 61,144,308 | `62C9CA0C0A56D54A6279944143C95AF9BF95BDA49A1C34CAF73A7AF85B67CE80` |
+| Production installer | 62,374,832 | `32CA8D40FB303FCBD8E4DF36EAAC02DBDC7E9E815CF3EA0C6AE0F4441A16C489` |
+| Disposable installer | 62,374,847 | `04C9FCD9FD4F31669446CC6E3FF4BEC126E5C900A24C7B4FDE14F1FE3A693F00` |
+
+Remote publication status is recorded in [PR #1](https://github.com/yunhyok/R2R-Evaluation-Report-Generator/pull/1)
+and the [v0.3.0 release](https://github.com/yunhyok/R2R-Evaluation-Report-Generator/releases/tag/v0.3.0).
+
+# Historical validation record — v0.3.0
+
+Validation date: 2026-08-26 (Asia/Seoul).
+
+The v0.3.0 source, packaged, installed, real-data, paired-output, and DPI evidence below was
+Sol-verified locally. GitHub publication and release staging were not performed in this turn.
+
+## Static and automated tests
+
+- `python -m ruff check .`: passed.
+- `python -m pytest`: **43 passed**.
+- Source self-test: `R2R_EVALUATION_REPORT_SELF_TEST_OK version=0.3.0`.
+- Source-only guard: `SOURCE_ONLY_GUARD_OK`.
+- Runtime dependency contract remains exactly `PySide6==6.11.1`, `openpyxl==3.1.5`.
+
+## Real-data paired acceptance
+
+The acceptance run used 10 measurement samples (9,880 rows), 11 prediction samples (10,868 rows),
+and one prediction-only sample. All expected mapped 3-class, operational binary, Expanded Normal,
+yield, and per-sample KPI values matched the established acceptance vectors.
+
+The source pair contained 14 sheets (10 report tabs). The code-and-fill workbook had 39,520 map body
+codes; the color-only workbook had 0. Every non-map value, report fill/border style, dimension,
+print setting, legend, chart, and matrix matched between the pair, apart from the intentional README
+display-mode marker. Artifact-tool formula/error search returned 0, and every color-only report tab
+rendered and passed visual inspection.
+
+| Workbook | Bytes | SHA-256 |
+|---|---:|---|
+| `R2R-Evaluation-Acceptance-20260826.xlsx` | 1,146,061 | `47ca6b36ac2ecc0fedb57eabfe0d66ee651c91445556b75fb99cf6acfbad96bf` |
+| `R2R-Evaluation-Acceptance-20260826-color-only.xlsx` | 1,134,519 | `8a7d1bd0d5f9f64f6df9a0e9238fac4d90d9b4ee3d9f50a00bd42fdaf96c740d` |
+
+## UI, packaged, and installed evidence
+
+- Source UI captures passed at effective 100%, 125%, and 150% with DPR 1.0, 1.25, and 1.5.
+- Packaged executable self-test and GUI smoke passed at effective 100%, 125%, and 150%; the
+  packaged actual paired UI workflow passed once at the default host 150% scale.
+- Installed disposable actual paired UI passed at effective 100%, 125%, and 150%. Independent
+  checks confirmed correct map counts for all six generated workbooks (three code-and-fill and three
+  color-only outputs).
+- After uninstall, the executable, install root, and HKCU/HKLM uninstall keys were absent.
+
+## Installer artifacts and lifecycle
+
+The standard disposable lifecycle for AppId `{2E42973D-7A33-4CF3-91FD-7A4C62ACCC4F}` completed one
+fresh install, installed self-test, synthetic export, GUI smoke, same-installer upgrade, and hidden
+uninstall run. Separately, the installed-real-UI harness repeated offscreen GUI smoke and actual
+paired UI at effective 100%, 125%, and 150% before uninstall. The production and disposable installers are unsigned; Windows SmartScreen
+may show a reputation warning, which is separate from functional validation.
+
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| Production installer | 61,572,742 | `FFEDC9CF7E4B73936E6D76F6D0BEFA8D160782EC760B1609155859F84A73364A` |
+| Disposable installer | 61,572,757 | `A6E78B91FC70F9E92D555E0A09105C450A45F20A16A16EFAF892918C99752992` |
+
+GitHub commits, pull requests, and releases were not published in this turn.
+
+# Historical validation record — v0.2.0-rc.1
 
 Validation date: 2026-08-11 (Asia/Seoul).
 Platform: Windows 11 `10.0.26200`, Python `3.12.13`, PySide6/Qt `6.11.1`,
