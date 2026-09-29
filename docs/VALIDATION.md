@@ -8,7 +8,7 @@ Validation date: 2026-09-30 (Asia/Seoul).
   measurement labels, all supplied samples, missing coordinates, unknown predictions, stale
   worksheet selection, input/output collisions, and switching between single/paired input.
 - Source self-test and the final frozen executable checks passed. Self-test now exports and
-  verifies comparison, measurement-only, and prediction-only workbook pairs.
+  verifies a comparison workbook plus measurement-only and prediction-only workbook pairs.
 - Both single-source UI screens passed offscreen captures at DPR 1.0, 1.25, and 1.5. Generated
   maps and summaries for both display variants were exported read-only through native Excel:
   all eight checked PDFs were one A3 landscape page; map and summary renders were inspected.
