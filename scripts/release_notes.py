@@ -29,7 +29,8 @@ def main(version: str, output: str = "release_notes.md") -> int:
             return 1
         notes = match.group(1).strip()
     Path(output).write_text(notes + FOOTER, encoding="utf-8")
-    print(notes + FOOTER)
+    # Windows runners use a cp1252 console; keep stdout ASCII and leave the text in the file.
+    print(f"wrote {output}: {len(notes)} characters for v{version}")
     return 0
 
 
