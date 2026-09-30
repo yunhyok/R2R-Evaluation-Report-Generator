@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
-from PySide6.QtWidgets import QComboBox
+from PySide6.QtWidgets import QComboBox, QDialog
 
 from r2r_evaluation_report import profile, schemes, wizard_backend
+from r2r_evaluation_report.core import default_sample_selection as core_default
 from r2r_evaluation_report.profile_workbook import verify_profile_workbook
 from r2r_evaluation_report.wizard import NO_MEMBER, ComparisonDialog, WizardWindow
 
@@ -204,3 +205,57 @@ def test_comparison_dialog_builds_reference_and_association(qtbot, files, tmp_pa
     reopened = ComparisonDialog(None, specs, labels, registry, existing=assoc)
     qtbot.addWidget(reopened)
     assert reopened.build() == assoc
+
+
+def test_wizard_asks_for_sample_blocks_and_persists_choice(qtbot, tmp_path) -> None:
+    from r2r_evaluation_report.wizard import SampleSelectionDialog
+    from tests.test_profile import _merged_converter_csv
+
+    source = _merged_converter_csv(tmp_path / "merged.csv")
+    registry = schemes.load_registry(user_path="/nonexistent")
+    specs = [profile.DatasetSpec("d1", str(source), "electrical_gt")]
+    pending = wizard_backend.pending_sample_selections(specs)
+    assert set(pending) == {"d1"} and len(pending["d1"]) == 7
+    assert (
+        wizard_backend.pending_sample_selections(
+            [profile.DatasetSpec("d1", str(source), samples={"CSV::x_sam7::0": "x_sam7"})]
+        )
+        == {}
+    )
+
+    dialog = SampleSelectionDialog(None, "Electrical", pending["d1"])
+    qtbot.addWidget(dialog)
+    # Defaults: every complete block checked, the partial one disabled, duplicates flagged.
+    assert dialog.current_selection() == core_default(pending["d1"])
+    assert not dialog.table.cellWidget(5, 0).isEnabled()
+    assert dialog.table.item(4, 8).text().startswith("동일 내용")
+    assert dialog.table.isRowHidden(2) and not dialog.table.isRowHidden(0)  # sam7 has no issue
+    dialog._bulk(first_only=True)
+    assert dialog.current_selection() == {
+        "CSV::x_sam5::0": "x_sam5",
+        "CSV::x_sam1::0": "x_sam1",
+        "CSV::x_sam7::0": "x_sam7",
+        "CSV::x_sam19::1": "x_sam19",
+    }
+    dialog.table.item(0, 1).setText("x_sam1")  # clash with another title -> blocked
+    dialog._accept()
+    assert dialog.result() != QDialog.Accepted and "중복" in dialog.problems_label.text()
+    dialog.table.item(0, 1).setText("x_sam5 (first)")
+    dialog._accept()
+    assert dialog.result() == QDialog.Accepted
+    assert dialog.selection["CSV::x_sam5::0"] == "x_sam5 (first)"
+
+    window = WizardWindow(test_mode=True, registry=registry)
+    qtbot.addWidget(window)
+    dataset_id = window.add_dataset(str(source), role="electrical_gt", title="Electrical")
+    window.run_preflight()  # test_mode picks the default selection automatically
+    assert window.load is not None
+    assert len(window.load.datasets[dataset_id].sheets) == 6
+    assert window.dataset_specs()[0].samples == core_default(pending["d1"])
+    window.set_samples(dataset_id, dialog.selection)
+    assert window.load is None  # selection change invalidates the load
+    window.run_preflight()
+    titles = [sheet.title for sheet in window.load.datasets[dataset_id].sheets]
+    assert titles == ["x_sam5 (first)", "x_sam1", "x_sam7", "x_sam19"]  # first sam5 block kept
+    saved = window.build_profile()
+    assert saved.datasets[0].samples == dialog.selection

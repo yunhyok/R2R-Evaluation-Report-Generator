@@ -1,3 +1,18 @@
+# v0.5.1
+
+- Repeated sample Names and incomplete arrays no longer reject a merged converter CSV: the parser
+  splits each Name into occurrences (a repeated coordinate starts a new block) and the wizard
+  opens a block-selection dialog (include / rename / drop, identical blocks flagged, incomplete
+  blocks excluded). The choice is stored in the profile (`datasets[].samples`) so `--profile`
+  reproduces it. The strict one-per-Name contract still applies when no selection is given.
+- Printed-Device-AI-Inspector `.xlsx` exports (Run / Results / Matrix / Attempts) are read
+  directly (Matrix preferred); long-format exports list concrete `provider:model_id` choices.
+- A task without a verdict (failed, unknown outcome) keeps its coordinate under the reserved
+  `(missing)` label: accepted by every scheme, excluded from every comparison, grey on maps.
+- Primary-dataset samples without an aligned partner stay in the report (maps only).
+- Fixed an O(n²) label-canonicalisation scan that made 70-sample reports take >10 minutes
+  (now ~30 s for the full pair).
+
 # v0.5.0
 
 - Linear five-step wizard (datasets → label schemes → comparisons → output → generate) replaces

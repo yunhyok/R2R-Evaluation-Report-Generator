@@ -155,3 +155,17 @@ co-occurrence map per selected 2 × 2 cell (Both / A only / B only / Neither). M
 `rows + 10` worksheet rows tall starting at row 8, columns `C…`, 2.5 wide; page breaks separate the
 blocks. The color-only sibling clears only the map bodies. Verification reopens both files and
 checks sheet order, map axes for the recorded grid, fills, and comparison titles.
+
+### Sample blocks, repeated Names and missing verdicts (v0.5.1)
+
+Within one worksheet a Name is split into *occurrences*: a coordinate that repeats starts a new
+block. `inspect_samples()` lists every `(worksheet, Name, occurrence)` block with its row range,
+unique-coordinate count and a content digest; `parse_dataset(samples=...)` keeps only the chosen
+complete blocks under the titles given (default `Name`, `Name #2`, …). Without a selection the
+historical strict contract (one complete block per Name) still applies. The selection is part of
+the report profile, so it is auditable and reproducible.
+
+A device whose source carries no usable verdict (an Inspector task that failed or returned an
+unknown outcome) is stored under the reserved label `(missing)`. It is accepted by every scheme,
+counted under *excluded* in every comparison, never placed on a contingency axis, and drawn grey on
+the maps, so a single failed call does not disqualify a complete 26 × 38 array.

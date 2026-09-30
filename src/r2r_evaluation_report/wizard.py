@@ -7,7 +7,7 @@ earlier step invalidates the later ones.  All domain work goes through
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import wizard_backend as backend
-from .core import DEFAULT_GRID
+from .core import DEFAULT_GRID, SampleCandidate, default_sample_selection
 from .profile import (
     CellSpec,
     ComparisonSpec,
@@ -401,6 +401,162 @@ class ComparisonDialog(QDialog):
         self.accept()
 
 
+class SampleSelectionDialog(QDialog):
+    """Choose which sample blocks of one dataset become samples.
+
+    Shown when a file repeats a Name (the same array measured twice, or two source
+    sheets sharing a Name) or contains incomplete arrays.  Complete blocks are
+    included by default under ``Name`` / ``Name #2`` …; incomplete blocks cannot be
+    included; identical blocks are flagged so a duplicated sheet can be dropped.
+    """
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        dataset_label: str,
+        candidates: Sequence[SampleCandidate],
+        existing: Mapping[str, str] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"샘플 블록 선택 — {dataset_label}")
+        self.setMinimumSize(1000, 560)
+        self.candidates = list(candidates)
+        self.selection: dict[str, str] = {}
+        layout = QVBoxLayout(self)
+        groups = backend.selection_summary(self.candidates)
+        repeated = sum(1 for items in groups.values() if len(items) > 1)
+        incomplete = sum(1 for item in self.candidates if not item.complete)
+        intro = QLabel(
+            f"이 파일에는 이름이 반복되는 샘플 {repeated}개, 불완전한 블록 {incomplete}개가 "
+            "있습니다. 포함할 블록을 고르고 필요하면 샘플 이름을 바꾸세요. 같은 이름의 블록을 "
+            "둘 다 포함하면 별도 샘플(#2, #3…)로 처리되고, 하나만 남기면 그 블록이 그 이름의 "
+            "샘플이 됩니다. 불완전한 블록(좌표 수 부족)은 포함할 수 없습니다. "
+            "'동일 내용'은 다른 블록과 좌표·라벨이 완전히 같은 경우입니다."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.only_issues = QCheckBox("문제가 있는 이름만 표시")
+        self.only_issues.setChecked(True)
+        self.only_issues.toggled.connect(self._refresh_visibility)
+        layout.addWidget(self.only_issues)
+        self.table = _table(
+            (
+                "포함",
+                "샘플 이름",
+                "원본 이름",
+                "회차",
+                "시트",
+                "행 범위",
+                "행 수",
+                "좌표",
+                "상태",
+                "라벨 분포",
+            )
+        )
+        layout.addWidget(self.table, 1)
+        selection = dict(existing) if existing else default_sample_selection(self.candidates)
+        digests: dict[str, str] = {}
+        self._issue_rows: list[bool] = []
+        self.table.setRowCount(len(self.candidates))
+        for row, item in enumerate(self.candidates):
+            group = groups[item.name]
+            issue = len(group) > 1 or not item.complete
+            self._issue_rows.append(issue)
+            include = QCheckBox()
+            include.setChecked(item.key in selection)
+            include.setEnabled(item.complete)
+            include.toggled.connect(self._refresh_problems)
+            self.table.setCellWidget(row, 0, include)
+            title = _item(selection.get(item.key, item.default_title), editable=True)
+            title.setData(Qt.UserRole, item.key)
+            self.table.setItem(row, 1, title)
+            self.table.setItem(row, 2, _item(item.name))
+            self.table.setItem(row, 3, _item(f"#{item.occurrence + 1} / {len(group)}"))
+            self.table.setItem(row, 4, _item(item.worksheet))
+            self.table.setItem(row, 5, _item(f"{item.first_row}–{item.last_row}"))
+            self.table.setItem(row, 6, _item(str(item.row_count)))
+            self.table.setItem(row, 7, _item(f"{item.unique_coordinates}/{item.grid_size}"))
+            if not item.complete:
+                status = "불완전"
+            elif item.content_digest in digests:
+                status = f"동일 내용 ({digests[item.content_digest]})"
+            else:
+                status = "완전"
+            if item.complete:
+                digests.setdefault(item.content_digest, item.default_title)
+            status_item = _item(status)
+            if status != "완전":
+                status_item.setForeground(Qt.red if not item.complete else Qt.darkYellow)
+            self.table.setItem(row, 8, status_item)
+            distribution = ", ".join(
+                f"{label} {count}" for label, count in sorted(item.label_counts.items())
+            )
+            self.table.setItem(row, 9, _item(distribution))
+        self.table.itemChanged.connect(self._refresh_problems)
+        self.table.resizeColumnsToContents()
+        self.problems_label = QLabel()
+        self.problems_label.setWordWrap(True)
+        self.problems_label.setStyleSheet("color: #b00020;")
+        layout.addWidget(self.problems_label)
+        buttons = QHBoxLayout()
+        all_complete = QPushButton("완전한 블록 모두 포함")
+        first_only = QPushButton("이름마다 첫 완전 블록만")
+        all_complete.clicked.connect(lambda: self._bulk(first_only=False))
+        first_only.clicked.connect(lambda: self._bulk(first_only=True))
+        buttons.addWidget(all_complete)
+        buttons.addWidget(first_only)
+        buttons.addStretch(1)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(self._accept)
+        box.rejected.connect(self.reject)
+        buttons.addWidget(box)
+        layout.addLayout(buttons)
+        self._refresh_visibility()
+        self._refresh_problems()
+
+    def _refresh_visibility(self) -> None:
+        only = self.only_issues.isChecked()
+        for row, issue in enumerate(self._issue_rows):
+            self.table.setRowHidden(row, only and not issue)
+
+    def _bulk(self, *, first_only: bool) -> None:
+        seen: set[str] = set()
+        for row, item in enumerate(self.candidates):
+            box = self.table.cellWidget(row, 0)
+            if not item.complete:
+                box.setChecked(False)
+                continue
+            if first_only and item.name in seen:
+                box.setChecked(False)
+            else:
+                box.setChecked(True)
+                seen.add(item.name)
+                if first_only:
+                    self.table.item(row, 1).setText(item.name)
+        self._refresh_problems()
+
+    def current_selection(self) -> dict[str, str]:
+        selection: dict[str, str] = {}
+        for row, item in enumerate(self.candidates):
+            box = self.table.cellWidget(row, 0)
+            if box is not None and box.isChecked():
+                selection[item.key] = self.table.item(row, 1).text().strip() or item.default_title
+        return selection
+
+    def _refresh_problems(self, *_: Any) -> None:
+        problems = backend.validate_selection(self.candidates, self.current_selection())
+        self.problems_label.setText("\n".join(problems))
+
+    def _accept(self) -> None:
+        selection = self.current_selection()
+        problems = backend.validate_selection(self.candidates, selection)
+        if problems:
+            self.problems_label.setText("\n".join(problems))
+            return
+        self.selection = selection
+        self.accept()
+
+
 # -------------------------------------------------------------------- window
 
 
@@ -674,6 +830,7 @@ class WizardWindow(QMainWindow):
         model_column: str | None = None,
         grid: tuple[int, int] = (DEFAULT_GRID.rows, DEFAULT_GRID.nodes),
         dataset_id: str | None = None,
+        samples: Mapping[str, str] | None = None,
     ) -> str:
         info = backend.inspect_source(path)
         existing = {spec.id for spec in self.dataset_specs()}
@@ -688,6 +845,7 @@ class WizardWindow(QMainWindow):
         title_item = _item(title or Path(path).stem, editable=True)
         title_item.setData(Qt.UserRole, dataset_id)
         title_item.setData(Qt.UserRole + 1, scheme)
+        title_item.setData(Qt.UserRole + 2, dict(samples or {}))
         self.dataset_table.setItem(row, 0, title_item)
         role_box = _combo(ROLE_TITLES.values(), ROLE_TITLES.get(role, ROLE_TITLES["other"]))
         self.dataset_table.setCellWidget(row, 1, role_box)
@@ -734,9 +892,18 @@ class WizardWindow(QMainWindow):
                     self.dataset_table.cellWidget(row, 5).value(),
                     model,
                     title_item.text().strip(),
+                    dict(title_item.data(Qt.UserRole + 2) or {}),
                 )
             )
         return specs
+
+    def set_samples(self, dataset_id: str, selection: Mapping[str, str]) -> None:
+        """Record the chosen sample blocks for a dataset (see SampleSelectionDialog)."""
+        for row in range(self.dataset_table.rowCount()):
+            item = self.dataset_table.item(row, 0)
+            if item.data(Qt.UserRole) == dataset_id:
+                item.setData(Qt.UserRole + 2, dict(selection))
+        self._invalidate_from(0)
 
     def _add_dataset_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "데이터 파일 선택", "", "데이터 (*.csv *.xlsx)")
@@ -774,18 +941,46 @@ class WizardWindow(QMainWindow):
                 model_column=spec.model_column,
                 grid=(spec.grid_rows, spec.grid_nodes),
                 dataset_id=spec.id,
+                samples=spec.samples,
             )
 
     def run_preflight(self) -> None:
+        """Step 1 check: inspect sample blocks (asking when ambiguous), then load and align."""
         specs = self.dataset_specs()
         if not specs:
             self._error("데이터셋을 하나 이상 추가하세요.")
             return
 
+        def inspect_job(progress):
+            return backend.pending_sample_selections(specs, progress)
+
+        self._run(inspect_job, self._sample_inspection_done, "샘플 블록을 검사하는 중…")
+
+    def _sample_inspection_done(self, pending: dict[str, tuple[SampleCandidate, ...]]) -> None:
+        labels = {spec.id: spec.label for spec in self.dataset_specs()}
+        for dataset_id, candidates in pending.items():
+            selection = self.choose_samples(dataset_id, labels[dataset_id], candidates)
+            if selection is None:
+                self.status_label.setText("샘플 블록 선택을 취소했습니다. 검사를 다시 실행하세요.")
+                return
+            self.set_samples(dataset_id, selection)
+        specs = self.dataset_specs()
+
         def job(progress):
             return backend.load_and_propose(specs, self.registry, progress)
 
         self._run(job, self._preflight_done, "파일을 읽고 샘플을 정렬하는 중…")
+
+    def choose_samples(
+        self, dataset_id: str, label: str, candidates: Sequence[SampleCandidate]
+    ) -> dict[str, str] | None:
+        """Open the block-selection dialog; ``test_mode`` takes the default selection."""
+        if self.test_mode:
+            return default_sample_selection(candidates)
+        dialog = SampleSelectionDialog(self, label, candidates)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return dialog.selection
 
     def _preflight_done(self, load: backend.LoadResult) -> None:
         self.load = load
@@ -1001,7 +1196,12 @@ class WizardWindow(QMainWindow):
     def build_profile(self) -> ReportProfile:
         specs = self.dataset_specs()
         base = ReportProfile(tuple(specs))
-        alignments = backend.build_alignments(base, self.confirmed_alignments())
+        primary_samples = [
+            self.alignment_table.item(r, 0).text() for r in range(self.alignment_table.rowCount())
+        ]
+        if not primary_samples and self.load is not None:
+            primary_samples = [sheet.title for sheet in self.load.datasets[specs[0].id].sheets]
+        alignments = backend.build_alignments(base, self.confirmed_alignments(), primary_samples)
         return ReportProfile(
             tuple(specs),
             tuple(self.comparisons),

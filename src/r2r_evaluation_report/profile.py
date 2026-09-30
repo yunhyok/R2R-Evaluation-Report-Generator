@@ -38,7 +38,7 @@ from .core import (
     parse_dataset,
     propose_mappings,
 )
-from .schemes import EXCLUDE, WILDCARD, SchemeRegistry, load_registry
+from .schemes import EXCLUDE, MISSING, WILDCARD, SchemeRegistry, load_registry
 
 ComparisonKind = Literal["reference", "association"]
 PROFILE_SCHEMA_VERSION = 1
@@ -69,6 +69,8 @@ class DatasetSpec:
     grid_nodes: int = DEFAULT_GRID.nodes
     model_column: str | None = None
     title: str = ""
+    samples: Mapping[str, str] = field(default_factory=dict)
+    """Chosen sample blocks (candidate key -> title); empty = strict one-per-Name contract."""
 
     @property
     def grid(self) -> Grid:
@@ -92,6 +94,8 @@ class DatasetSpec:
             data["model_column"] = self.model_column
         if self.title:
             data["title"] = self.title
+        if self.samples:
+            data["samples"] = dict(self.samples)
         return data
 
     @classmethod
@@ -110,6 +114,7 @@ class DatasetSpec:
             int(grid[1]),
             data.get("model_column") or None,
             str(data.get("title") or ""),
+            {str(k): str(v) for k, v in (data.get("samples") or {}).items()},
         )
 
 
@@ -355,6 +360,7 @@ def load_datasets(profile: ReportProfile) -> dict[str, ParsedDataset]:
             spec.worksheets or None,
             grid=spec.grid,
             model_column=spec.model_column,
+            samples=spec.samples or None,
         )
         for spec in profile.datasets
     }
@@ -388,10 +394,18 @@ def propose_alignments(
 
 
 def auto_alignments(
-    profile: ReportProfile, proposals: Iterable[AlignmentProposal]
+    profile: ReportProfile,
+    proposals: Iterable[AlignmentProposal],
+    primary_samples: Iterable[str] = (),
 ) -> tuple[AlignmentSpec, ...]:
-    """Alignments that need no confirmation (exact title matches only)."""
+    """Alignments that need no confirmation (exact title matches only).
+
+    ``primary_samples`` lists every sample of the primary dataset so that samples
+    without a partner still appear (maps only; comparisons skip them).
+    """
     members: dict[str, dict[str, str]] = defaultdict(dict)
+    for sample in primary_samples:
+        members.setdefault(sample, {})
     for item in proposals:
         for proposal in item.proposals:
             if not proposal.requires_confirmation:
@@ -403,11 +417,19 @@ def auto_alignments(
 
 
 def alignments_from_confirmed(
-    profile: ReportProfile, confirmed: Iterable[tuple[str, str, str]]
+    profile: ReportProfile,
+    confirmed: Iterable[tuple[str, str, str]],
+    primary_samples: Iterable[str] = (),
 ) -> tuple[AlignmentSpec, ...]:
-    """Build alignments from ``(dataset_id, primary_sample, member_sheet)`` triples."""
+    """Build alignments from ``(dataset_id, primary_sample, member_sheet)`` triples.
+
+    Primary samples listed in ``primary_samples`` but confirmed with no partner are
+    kept as single-member alignments so their maps are still reported.
+    """
     members: dict[str, dict[str, str]] = defaultdict(dict)
     primary_id = profile.primary.id
+    for sample in primary_samples:
+        members.setdefault(sample, {})
     for dataset_id, sample, sheet in confirmed:
         if dataset_id == primary_id:
             continue
@@ -548,7 +570,7 @@ def _map_value(
     key = _normalise(raw)
     if not key:
         return None, False
-    if key in {_normalise(item) for item in exclude}:
+    if key == _normalise(MISSING) or key in {_normalise(item) for item in exclude}:
         return None, True
     if not mapping:
         return raw, False
@@ -576,7 +598,7 @@ def _label_order(
     if mapping:
         targets = [value for value in mapping.values() if value != EXCLUDE]
         return tuple(dict.fromkeys(targets))
-    excluded = {_normalise(item) for item in exclude}
+    excluded = {_normalise(item) for item in exclude} | {_normalise(MISSING)}
     return tuple(label for label in raw_labels if _normalise(label) not in excluded)
 
 
@@ -740,7 +762,8 @@ def label_orders(
             by_key[_normalise(label)] for label in scheme.labels if _normalise(label) in by_key
         ]
         extras = [label for label in observed if scheme.canonical(label) is None]
-        orders[spec.id] = tuple(ordered + extras)
+        missing = [label for label in observed if _normalise(label) == _normalise(MISSING)]
+        orders[spec.id] = tuple(ordered + extras + missing)
     return orders
 
 
@@ -779,12 +802,10 @@ def evaluate_profile(
     datasets = dict(datasets) if datasets is not None else load_datasets(profile)
     errors: list[str] = []
     alignments = profile.alignments
+    primary_samples = [sheet.title for sheet in datasets[profile.primary.id].sheets]
     if not alignments:
-        alignments = auto_alignments(profile, propose_alignments(profile, datasets))
-    if len(profile.datasets) == 1:
-        alignments = tuple(
-            AlignmentSpec(sheet.title, {profile.primary.id: sheet.title})
-            for sheet in datasets[profile.primary.id].sheets
+        alignments = auto_alignments(
+            profile, propose_alignments(profile, datasets), primary_samples
         )
     if not alignments:
         errors.append("no sample could be aligned across the datasets")
