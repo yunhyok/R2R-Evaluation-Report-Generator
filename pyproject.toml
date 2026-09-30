@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "r2r-evaluation-report-generator"
-version = "0.4.0"
-description = "Generate auditable 26x38 R2R measurement and prediction evaluation workbooks."
+version = "0.5.0"
+description = "Auditable R2R printed-device evaluation workbooks: spatial maps, reference and association comparisons."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Proprietary"}
@@ -13,6 +13,8 @@ authors = [{name = "Yunhyok"}]
 dependencies = [
     "PySide6==6.11.1",
     "openpyxl==3.1.5",
+    "numpy==2.5.3",
+    "scipy==1.18.1",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +33,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"r2r_evaluation_report.schemes" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

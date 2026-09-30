@@ -1747,6 +1747,11 @@ def _verify_single_source(wb: Workbook, mode: str) -> None:
         raise ValueError("Single-source summary must contain one label-distribution chart")
 
 
+def _is_profile_result(evaluation: Any) -> bool:
+    """Duck-typed check for :class:`profile.ProfileResult` (keeps this module import-light)."""
+    return hasattr(evaluation, "profile") and hasattr(evaluation, "comparisons")
+
+
 def _cancelled(check: Callable[[], bool] | Any | None) -> bool:
     if check is None:
         return False
@@ -1777,6 +1782,11 @@ def verify_workbook_structure(path_or_workbook: str | Path | Workbook) -> None:
         mode = wb["README"]["B2"].value if "README" in wb.sheetnames else None
         if mode in ("measurement", "prediction"):
             _verify_single_source(wb, mode)
+            return
+        if mode == "profile":
+            from .profile_workbook import verify_profile_workbook
+
+            verify_profile_workbook(wb)
             return
         if wb.sheetnames[:3] != ["README", "Mapping_Audit", "Joined_Data"]:
             raise ValueError("README, Mapping_Audit, Joined_Data must be first")
@@ -1880,6 +1890,19 @@ def _render_verified(
         if _cancelled(cancel_check):
             raise WorkbookCancelled("Workbook generation was cancelled")
         workbook = Workbook()
+        if _is_profile_result(evaluation):
+            from .profile_workbook import render_profile_workbook
+
+            render_profile_workbook(
+                workbook, evaluation, cancel_check, show_map_codes=show_map_codes
+            )
+            workbook.save(path)
+            workbook.close()
+            workbook = None
+            verify_workbook_structure(path)
+            if _cancelled(cancel_check):
+                raise WorkbookCancelled("Workbook generation was cancelled")
+            return
         samples = _samples(evaluation)
         _readme_sheet(workbook, evaluation, show_map_codes=show_map_codes)
         if _value(evaluation, "report_mode", default="comparison") != "comparison":

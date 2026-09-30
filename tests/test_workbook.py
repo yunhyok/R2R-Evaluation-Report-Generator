@@ -435,9 +435,10 @@ def test_pair_generation_preserves_map_fills_and_blanks_only_body_codes(tmp_path
                     for row in range(body, body + 26):
                         for col in range(4, 42):
                             assert color_ws.cell(row, col).value is None
-                            assert color_ws.cell(row, col).fill.fgColor.rgb == text_ws.cell(
-                                row, col
-                            ).fill.fgColor.rgb
+                            assert (
+                                color_ws.cell(row, col).fill.fgColor.rgb
+                                == text_ws.cell(row, col).fill.fgColor.rgb
+                            )
                 assert color_ws["A1"].value == text_ws["A1"].value
                 assert color_ws["D4"].value == text_ws["D4"].value
                 assert color_ws["AZ4"].value == text_ws["AZ4"].value == "Measurement legend"

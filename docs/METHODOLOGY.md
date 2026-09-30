@@ -98,3 +98,60 @@ The code-and-fill and color-only workbooks share the existing verified pair-comm
 path; only D9:AO34 in each single-source report is cleared in the color-only copy. README records
 the input kind and why comparison results are absent. Switching inputs or source worksheets
 requires a fresh preflight; output paths cannot replace either source input.
+
+## Profile reports: N datasets and selectable comparisons (v0.5.0)
+
+A **report profile** (JSON, saved next to every workbook as `<stem>.profile.json` and embedded in
+the README sheet) describes one run: the datasets, their label schemes, the confirmed sample
+alignment, the comparisons, and the output options. `--profile FILE` regenerates the report
+headlessly. The v0.2–v0.4 report is the profile produced by `profile.legacy_profile()`; its
+three-class, binary, and Expanded Normal metrics are identical to `core.evaluate()` (regression
+tested), while the workbook layout is the generic profile layout below.
+
+### Label schemes
+
+Raw label vocabularies live in `schemes/label_schemes.json` (bundled; a user copy at
+`%APPDATA%\R2R Evaluation Report Generator\label_schemes.json` may add or override entries).
+Each dataset declares a scheme; labels outside the declared scheme block the run instead of being
+scored. Mapping presets (`legacy_to_3class`, `e5_to_binary`, `optical_to_binary`, …) express
+raw → category rules; `Exclude` drops a record from that comparison and `*` is a fallback.
+The bundled legacy presets reproduce the v0.2 hard-coded rules exactly.
+
+Supported sources: measurement CSV/XLSX (`Name, Row, Node, Status`), R2R-Machine-Learning
+predictions (`name, row, node, prediction`), ImageMarker 2.x exports (`Status` write-back or
+`name,row,node,label` CSV) and Printed-Device-AI-Inspector long/matrix CSV (`image_path`, identity
+parsed from `<name>_rgb_<row>_<node>.png`; the model is chosen as `provider:model_id`). The grid is
+a dataset property (default 26 × 38); every sample must still supply exactly `rows × nodes`
+unique coordinates.
+
+### Comparison kinds
+
+* **reference** — side A is ground truth for side B. Confusion matrix (rows actual, columns
+  predicted), accuracy with Wilson CI, balanced accuracy, macro/weighted F1, per-class
+  precision/recall/F1/specificity/FPR/FNR, Cohen's κ, multi-class MCC (Gorodkin 2004), and the
+  **majority-class baseline** (share of A's largest class), so an accuracy below the baseline is
+  visible in the report itself. Three-class macro-F1 keeps the strict `N/A` rule.
+* **association** — neither side is truth (for example electrical `E-Invalid` against optical
+  `BAD`). Accuracy-type metrics are deliberately not reported because they depend on which side is
+  declared "truth". Reported instead:
+
+  | Level | Statistic | Reference |
+  |---|---|---|
+  | whole r × c table | counts, row %, column %, expected counts, Pearson χ² and p, Cramér's V and the Bergsma bias-corrected V | Agresti 2013; Bergsma 2013 |
+  | per cell | adjusted standardized residual, ~N(0,1) under independence; \|z\| > 1.96 highlighted | Haberman 1973 |
+  | direction | Theil's U(B\|A) and U(A\|B) | Theil 1970 |
+  | selected 2 × 2 cells | a/b/c/d, odds ratio with Woolf 95 % CI (Haldane–Anscombe 0.5 correction when a cell is empty), relative risk, φ, Yule's Q, two-sided Fisher exact p, Holm-adjusted p across the selected cells | Agresti 2013; Holm 1979 |
+  | shared categories only | Cohen's κ with positive and negative agreement | Cohen 1960; Cicchetti & Feinstein 1990 |
+
+  A Cochran warning is raised when more than 20 % of expected counts are below 5 or any is below 1.
+  Undefined values stay `N/A`; a p-value that underflows double precision is printed as `< 1E-300`.
+
+### Workbook layout
+
+`README → Label_Audit → Alignment → Joined_Data (optional) → S01…Snn (optional) → C01…Cnn →
+Overall Summary`. Each `Snn` sheet stacks, per aligned sample, one map per dataset (raw labels),
+one agreement map per reference comparison (Match / Mismatch / Excluded / Missing) and one
+co-occurrence map per selected 2 × 2 cell (Both / A only / B only / Neither). Map blocks are
+`rows + 10` worksheet rows tall starting at row 8, columns `C…`, 2.5 wide; page breaks separate the
+blocks. The color-only sibling clears only the map bodies. Verification reopens both files and
+checks sheet order, map axes for the recorded grid, fills, and comparison titles.

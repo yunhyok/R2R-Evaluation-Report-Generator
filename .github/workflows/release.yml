@@ -1,0 +1,79 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $pkg = (python -c "from r2r_evaluation_report import __version__; print(__version__)").Trim()
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          if ($pkg -ne $tag) { throw "Tag $tag does not match package version $pkg" }
+      - name: Ensure Inno Setup (with Korean translation) is available
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) { choco install innosetup -y --no-progress }
+          if (-not (Test-Path -LiteralPath $iscc)) { throw 'ISCC.exe not found after install.' }
+          $languages = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\Languages'
+          $korean = Join-Path $languages 'Korean.isl'
+          if (-not (Test-Path -LiteralPath $korean)) {
+            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Korean.isl' -OutFile $korean
+          }
+          Get-Item $korean | Select-Object FullName, Length
+      - name: Tests, PyInstaller build, executable checks and installers
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
+      - name: Installed-executable checks (installer smoke)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $version = (python -c "from r2r_evaluation_report import __version__; print(__version__)").Trim()
+          $setup = ".\dist\installer\disposable\R2R-Evaluation-Report-Generator-$version-disposable-setup.exe"
+          $root = Join-Path $env:TEMP 'R2REvaluationReportGenerator-Verification-ci'
+          Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$root") -Wait
+          $exe = Join-Path $root 'R2REvaluationReportGenerator.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw 'Installed executable missing.' }
+          & $exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Installed self-test failed.' }
+          & $exe --gui-smoke-test
+          if ($LASTEXITCODE -ne 0) { throw 'Installed GUI smoke test failed.' }
+          $uninstall = Join-Path $root 'unins000.exe'
+          Start-Process -FilePath $uninstall -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait
+      - name: Collect release notes for this version
+        run: python scripts/release_notes.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: |
+            dist/installer/*.exe
+            dist/installer/*.sha256
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $setup = "dist/installer/R2R-Evaluation-Report-Generator-$version-setup.exe"
+          gh release create "${{ github.ref_name }}" $setup "$setup.sha256" `
+            --title "R2R Evaluation Report Generator ${{ github.ref_name }}" `
+            --notes-file release_notes.md --verify-tag
