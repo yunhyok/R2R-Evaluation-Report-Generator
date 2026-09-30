@@ -22,13 +22,35 @@ from typing import Any, Literal
 
 from openpyxl import load_workbook
 
-DatasetKind = Literal["measurement", "prediction"]
+DatasetKind = Literal["measurement", "prediction", "label"]
 Coordinate = tuple[int, int]
 RecordKey = tuple[str, int, int]
 GRID_ROWS = 26
 GRID_NODES = 38
 GRID_SIZE = GRID_ROWS * GRID_NODES
 TARGET_CLASSES = ("Normal", "Open", "Short")
+
+
+@dataclass(frozen=True)
+class Grid:
+    """Printed array geometry.  Every sample must supply exactly ``rows * nodes`` devices."""
+
+    rows: int = GRID_ROWS
+    nodes: int = GRID_NODES
+
+    def __post_init__(self) -> None:
+        if self.rows < 1 or self.nodes < 1:
+            raise ValueError("grid rows and nodes must be positive integers")
+
+    @property
+    def size(self) -> int:
+        return self.rows * self.nodes
+
+    def contains(self, row: int, node: int) -> bool:
+        return 1 <= row <= self.rows and 1 <= node <= self.nodes
+
+
+DEFAULT_GRID = Grid()
 
 
 class DataContractError(ValueError):
@@ -39,20 +61,42 @@ def _normalise(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", unicodedata.normalize("NFKC", str(value)).casefold())
 
 
+_NAME_ALIASES = ("name", "sample name", "sample", "device name", "id")
+_ROW_ALIASES = ("row", "r")
+_NODE_ALIASES = ("node", "column", "col", "n")
+_STATUS_ALIASES = ("status", "measurement status", "result", "measurement result")
+_PREDICTION_ALIASES = ("prediction", "predicted class", "predicted", "pred", "class")
+# Generic label sources: ImageMarker CSV exports ``label``; Printed-Device-AI-Inspector
+# exports ``verdict``.  Measurement/prediction spellings remain accepted.
+_LABEL_ALIASES = ("label", "verdict", *_STATUS_ALIASES, *_PREDICTION_ALIASES)
 _HEADERS: dict[DatasetKind, dict[str, tuple[str, ...]]] = {
     "measurement": {
-        "name": ("name", "sample name", "sample", "device name", "id"),
-        "row": ("row", "r"),
-        "node": ("node", "column", "col", "n"),
-        "status": ("status", "measurement status", "result", "measurement result"),
+        "name": _NAME_ALIASES,
+        "row": _ROW_ALIASES,
+        "node": _NODE_ALIASES,
+        "status": _STATUS_ALIASES,
     },
     "prediction": {
-        "name": ("name", "sample name", "sample", "device name", "id"),
-        "row": ("row", "r"),
-        "node": ("node", "column", "col", "n"),
-        "prediction": ("prediction", "predicted class", "predicted", "pred", "class"),
+        "name": _NAME_ALIASES,
+        "row": _ROW_ALIASES,
+        "node": _NODE_ALIASES,
+        "prediction": _PREDICTION_ALIASES,
+    },
+    "label": {
+        "name": _NAME_ALIASES,
+        "row": _ROW_ALIASES,
+        "node": _NODE_ALIASES,
+        "label": _LABEL_ALIASES,
     },
 }
+_VALUE_FIELD: dict[DatasetKind, str] = {
+    "measurement": "status",
+    "prediction": "prediction",
+    "label": "label",
+}
+IMAGE_PATH_HEADER = "image_path"
+_IMAGE_PATH_KEY = "imagepath"  # ``_normalise(IMAGE_PATH_HEADER)``
+_IMAGE_NAME_PATTERN = re.compile(r"^(?P<name>.+)_rgb_(?P<row>\d+)_(?P<node>\d+)\.png$", re.I)
 _OPTIONAL_HEADERS = {
     "confidence": ("confidence", "confidence score", "score", "probability"),
     "review_required": ("review required", "review_required", "review", "requires review"),
@@ -148,6 +192,16 @@ class ParsedDataset:
     kind: DatasetKind
     path: str
     sheets: tuple[ParsedSheet, ...]
+    grid: Grid = DEFAULT_GRID
+
+    @property
+    def raw_labels(self) -> tuple[str, ...]:
+        """Distinct raw label spellings in first-seen order."""
+        seen: dict[str, str] = {}
+        for sheet in self.sheets:
+            for record in sheet.records:
+                seen.setdefault(_normalise(record.value), record.value)
+        return tuple(seen.values())
 
 
 @dataclass(frozen=True)
@@ -361,6 +415,109 @@ def _infer_kind(headers: Iterable[object]) -> DatasetKind | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _has_header(headers: Iterable[object], name: str) -> bool:
+    return any(_normalise(header) == _normalise(name) for header in headers if header is not None)
+
+
+def inspector_model_columns(headers: Iterable[object]) -> tuple[str, ...]:
+    """Verdict columns of a Printed-Device-AI-Inspector export.
+
+    The *matrix* CSV carries one ``provider:model_id`` column per model (plus
+    ``... actual_model_id`` / ``... reason`` companions); the *long* CSV carries a
+    single ``verdict`` column with ``provider``/``model_id`` rows.  The returned
+    names are what :func:`parse_dataset` accepts as ``model_column``.
+    """
+    names = [str(header).strip() for header in headers if header is not None]
+    if not any(_normalise(name) == _IMAGE_PATH_KEY for name in names):
+        return ()
+    if any(_normalise(name) == "verdict" for name in names):
+        return ("verdict",)
+    reserved = {_IMAGE_PATH_KEY, "imagesha256", "agreement"}
+    return tuple(
+        name
+        for name in names
+        if ":" in name
+        and _normalise(name) not in reserved
+        and not name.endswith(" actual_model_id")
+        and not name.endswith(" reason")
+    )
+
+
+def _inspector_rows(
+    headers: Sequence[str],
+    rows: Sequence[Mapping[str, Any]],
+    model_column: str | None,
+    context: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Rewrite an Inspector export into ``Name/Row/Node/label`` rows.
+
+    Identity comes from the image file name (``<prefix>_rgb_<row>_<node>.png``,
+    the ImageMarker/Inspector slice contract).  For the long CSV every
+    ``(provider, model_id)`` is a separate label source, so ``model_column`` must
+    name one as ``provider:model_id``; for the matrix CSV it names the column.
+    """
+    candidates = inspector_model_columns(headers)
+    if not candidates:
+        raise DataContractError(f"{context}: no Inspector verdict column was found")
+    if model_column is None:
+        if len(candidates) == 1 and candidates[0] != "verdict":
+            model_column = candidates[0]
+        else:
+            raise DataContractError(
+                f"{context}: choose the Inspector model column; candidates: "
+                + ", ".join(candidates)
+            )
+    image_header = next(h for h in headers if _normalise(h) == _IMAGE_PATH_KEY)
+    long_format = candidates == ("verdict",)
+    if long_format:
+        provider_header = next((h for h in headers if _normalise(h) == "provider"), None)
+        model_header = next((h for h in headers if _normalise(h) == "modelid"), None)
+        status_header = next((h for h in headers if _normalise(h) == "status"), None)
+        if not provider_header or not model_header:
+            raise DataContractError(f"{context}: long export needs provider and model_id")
+    elif model_column not in headers:
+        raise DataContractError(f"{context}: model column {model_column!r} is not in the file")
+    passthrough = [
+        h
+        for h in headers
+        if _normalise(h) in {"imagesha256", "agreement", "reason", "confidence"}
+        or h == f"{model_column} reason"
+    ]
+    out_headers = ["Name", "Row", "Node", "label", "image_path", *passthrough]
+    out_rows: list[dict[str, Any]] = []
+    for row in rows:
+        image_path = str(row.get(image_header) or "").strip()
+        if not image_path:
+            continue
+        if long_format:
+            key = f"{row.get(provider_header, '')}:{row.get(model_header, '')}"
+            if key != model_column:
+                continue
+            if status_header and _normalise(row.get(status_header)) not in {"", "succeeded"}:
+                # Failed / skipped tasks have no verdict; keep the row out of the label set.
+                continue
+            value = row.get("verdict")
+        else:
+            value = row.get(model_column)
+        base = image_path.replace("\\", "/").rsplit("/", 1)[-1]
+        match = _IMAGE_NAME_PATTERN.match(base)
+        if not match:
+            raise DataContractError(
+                f"{context}: image file {base!r} does not follow <name>_rgb_<row>_<node>.png"
+            )
+        out_rows.append(
+            {
+                "Name": match.group("name"),
+                "Row": int(match.group("row")),
+                "Node": int(match.group("node")),
+                "label": value,
+                "image_path": image_path,
+                **{h: row.get(h) for h in passthrough},
+            }
+        )
+    return out_headers, out_rows
+
+
 def discover_worksheets(
     path: str | Path, kind: DatasetKind | None = None
 ) -> tuple[WorksheetInfo, ...]:
@@ -375,6 +532,8 @@ def discover_worksheets(
         raise DataContractError(".xls is unsupported; save the source as .xlsx or .csv")
     if suffix == ".csv":
         headers, _rows, _encoding = _read_csv(source)
+        if _has_header(headers, IMAGE_PATH_HEADER) and inspector_model_columns(headers):
+            return (WorksheetInfo("CSV", 1, tuple(headers)),)
         if (kind and not _header_map(headers, kind)) or (not kind and not _infer_kind(headers)):
             return ()
         return (WorksheetInfo("CSV", 1, tuple(headers)),)
@@ -464,26 +623,27 @@ def _parse_rows(
     header_map: Mapping[str, str],
     kind: DatasetKind,
     metadata: SourceMetadata,
+    grid: Grid = DEFAULT_GRID,
 ) -> tuple[R2RRecord, ...]:
     records: list[R2RRecord] = []
     seen_by_name: dict[str, set[Coordinate]] = defaultdict(set)
+    value_field = _VALUE_FIELD[kind]
+    value_name = {"status": "Status", "prediction": "prediction", "label": "label"}[value_field]
     for row_number, source_row in rows:
         # Completely blank tail rows are not records; partially blank rows remain errors.
         if not any(value is not None and str(value).strip() for value in source_row.values()):
             continue
         context = f"{metadata.path} [{metadata.worksheet or 'CSV'}] row {row_number}"
         name = _as_text(source_row.get(header_map["name"]))
-        value = _as_text(
-            source_row.get(header_map["status" if kind == "measurement" else "prediction"])
-        )
+        value = _as_text(source_row.get(header_map[value_field]))
         if not name or not value:
-            value_name = "Status" if kind == "measurement" else "prediction"
             raise DataContractError(f"{context}: Name and {value_name} are required")
         row = _int_coordinate(source_row.get(header_map["row"]), "Row", context)
         node = _int_coordinate(source_row.get(header_map["node"]), "Node", context)
-        if not 1 <= row <= GRID_ROWS or not 1 <= node <= GRID_NODES:
+        if not grid.contains(row, node):
             raise DataContractError(
-                f"{context}: coordinate ({row}, {node}) is outside Row 1..26 / Node 1..38"
+                f"{context}: coordinate ({row}, {node}) is outside "
+                f"Row 1..{grid.rows} / Node 1..{grid.nodes}"
             )
         coordinate = (row, node)
         normalised_name = _normalise(name)
@@ -535,14 +695,14 @@ def _parse_rows(
     if not seen_by_name:
         location = f"{metadata.path} [{metadata.worksheet or 'CSV'}]"
         raise DataContractError(
-            f"{location}: expected at least one Name with exactly {GRID_SIZE} unique coordinates"
+            f"{location}: expected at least one Name with exactly {grid.size} unique coordinates"
         )
     for normalised_name, coordinates in seen_by_name.items():
-        if len(coordinates) != GRID_SIZE:
-            missing = GRID_SIZE - len(coordinates)
+        if len(coordinates) != grid.size:
+            missing = grid.size - len(coordinates)
             location = f"{metadata.path} [{metadata.worksheet or 'CSV'}]"
             raise DataContractError(
-                f"{location}: Name {normalised_name!r} expected exactly {GRID_SIZE} "
+                f"{location}: Name {normalised_name!r} expected exactly {grid.size} "
                 f"unique coordinates; found {len(coordinates)} ({missing:+d} vs expected)"
             )
     return tuple(records)
@@ -585,8 +745,17 @@ def parse_dataset(
     path: str | Path,
     kind: DatasetKind,
     worksheets: str | Sequence[str] | None = None,
+    *,
+    grid: Grid = DEFAULT_GRID,
+    model_column: str | None = None,
 ) -> ParsedDataset:
-    """Parse every selected contract-bearing worksheet into immutable records."""
+    """Parse every selected contract-bearing worksheet into immutable records.
+
+    ``kind="label"`` accepts any of the measurement/prediction value headers plus
+    ImageMarker ``label`` and Inspector ``verdict`` columns, and additionally reads
+    Inspector ``image_path`` exports (``model_column`` selects the model).  ``grid``
+    sets the per-sample geometry; the default is the 26 x 38 contract.
+    """
     source = Path(path)
     suffix = source.suffix.casefold()
     if suffix == ".xls":
@@ -595,13 +764,19 @@ def parse_dataset(
         if worksheets not in (None, "CSV", ("CSV",)):
             raise DataContractError("CSV exposes only the virtual worksheet 'CSV'")
         headers, rows, encoding = _read_csv(source)
+        if _has_header(headers, IMAGE_PATH_HEADER) and not _header_map(headers, kind):
+            if kind != "label":
+                raise DataContractError(
+                    f"{source}: Inspector image_path exports are read as kind='label'"
+                )
+            headers, rows = _inspector_rows(headers, rows, model_column, str(source))
         header_map = _header_map(headers, kind)
         if not header_map:
             raise DataContractError(f"CSV is missing required {kind} headers")
         metadata = _source_metadata(source, encoding=encoding, worksheet="CSV")
-        records = _parse_rows(enumerate(rows, start=2), header_map, kind, metadata)
+        records = _parse_rows(enumerate(rows, start=2), header_map, kind, metadata, grid)
         parsed = _sample_sheets(kind, metadata, records, header_map)
-        return ParsedDataset(kind, str(source), parsed)
+        return ParsedDataset(kind, str(source), parsed, grid)
     if suffix != ".xlsx":
         raise DataContractError("only .csv and .xlsx sources are supported")
     candidates = discover_worksheets(source, kind)
@@ -648,10 +823,10 @@ def parse_dataset(
                     start=info.header_row + 1,
                 )
             )
-            records = _parse_rows(rows, header_map, kind, metadata)
+            records = _parse_rows(rows, header_map, kind, metadata, grid)
             parsed.extend(_sample_sheets(kind, metadata, records, header_map))
         _ensure_unique_samples(parsed)
-        return ParsedDataset(kind, str(source), tuple(parsed))
+        return ParsedDataset(kind, str(source), tuple(parsed), grid)
     finally:
         workbook.close()
 

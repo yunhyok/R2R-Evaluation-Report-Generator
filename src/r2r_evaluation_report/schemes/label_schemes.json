@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "schemes": {
+    "legacy_electrical": {
+      "title": "Electrical (legacy, R2R-TXT-Converter <= v1.3)",
+      "labels": ["Pass", "No Active", "None", "Open", "Short", "No Gate Effect"],
+      "description": "Historic converter statuses. 'None' is the converter fallback and mixes artifacts with no-modulation devices."
+    },
+    "electrical_e5": {
+      "title": "Electrical E-5 (2026-09-30 decision)",
+      "labels": ["E-Normal", "E-NoActive", "E-Open", "E-Short", "E-Invalid"],
+      "description": "Pure I-V labels. E-Invalid marks a measurement artifact and is normally excluded from reference evaluations but kept in association tables."
+    },
+    "ml_3class": {
+      "title": "ML prediction (Normal / Open / Short)",
+      "labels": ["Normal", "Open", "Short"],
+      "description": "R2R-Machine-Learning three-class output."
+    },
+    "optical_3": {
+      "title": "Optical (GOOD / BAD / OPEN)",
+      "labels": ["GOOD", "BAD", "OPEN"],
+      "description": "Human (ImageMarker 2.x) or VLM (Printed-Device-AI-Inspector) visual labels."
+    },
+    "binary_pass_fail": {
+      "title": "Binary (Pass / Fail)",
+      "labels": ["Pass", "Fail"],
+      "description": "Operational binary view. Positive class is Fail."
+    },
+    "inspector_pass_fail": {
+      "title": "Inspector legacy verdict (PASS / FAIL)",
+      "labels": ["PASS", "FAIL"],
+      "description": "Printed-Device-AI-Inspector default binary verdict set."
+    }
+  },
+  "presets": {
+    "legacy_to_3class": {
+      "title": "legacy -> Normal/Open/Short (v0.2 canonical)",
+      "source": "legacy_electrical",
+      "targets": ["Normal", "Open", "Short"],
+      "rules": {
+        "Pass": "Normal", "No Active": "Normal", "None": "Normal",
+        "Open": "Open", "Short": "Short", "No Gate Effect": "Exclude"
+      }
+    },
+    "legacy_to_binary": {
+      "title": "legacy -> Pass/Fail (v0.2 operational)",
+      "source": "legacy_electrical",
+      "targets": ["Pass", "Fail"],
+      "rules": {"Pass": "Pass", "*": "Fail"}
+    },
+    "legacy_to_expanded_normal": {
+      "title": "legacy -> Expanded Normal (No Gate Effect -> Normal)",
+      "source": "legacy_electrical",
+      "targets": ["Normal", "Open", "Short"],
+      "rules": {
+        "Pass": "Normal", "No Active": "Normal", "None": "Normal",
+        "Open": "Open", "Short": "Short", "No Gate Effect": "Normal"
+      }
+    },
+    "e5_to_3class": {
+      "title": "E-5 -> Normal/Open/Short",
+      "source": "electrical_e5",
+      "targets": ["Normal", "Open", "Short"],
+      "rules": {
+        "E-Normal": "Normal", "E-NoActive": "Normal",
+        "E-Open": "Open", "E-Short": "Short", "E-Invalid": "Exclude"
+      }
+    },
+    "e5_to_binary": {
+      "title": "E-5 -> Pass/Fail",
+      "source": "electrical_e5",
+      "targets": ["Pass", "Fail"],
+      "rules": {"E-Normal": "Pass", "E-Invalid": "Exclude", "*": "Fail"}
+    },
+    "ml_to_binary": {
+      "title": "ML 3-class -> Pass/Fail",
+      "source": "ml_3class",
+      "targets": ["Pass", "Fail"],
+      "rules": {"Normal": "Pass", "*": "Fail"}
+    },
+    "optical_to_binary": {
+      "title": "Optical -> Pass/Fail",
+      "source": "optical_3",
+      "targets": ["Pass", "Fail"],
+      "rules": {"GOOD": "Pass", "*": "Fail"}
+    },
+    "optical_to_3class": {
+      "title": "Optical -> Normal/Open/Short (BAD treated as Short-like)",
+      "source": "optical_3",
+      "targets": ["Normal", "Open", "Short"],
+      "rules": {"GOOD": "Normal", "OPEN": "Open", "BAD": "Short"}
+    },
+    "inspector_to_binary": {
+      "title": "Inspector PASS/FAIL -> Pass/Fail",
+      "source": "inspector_pass_fail",
+      "targets": ["Pass", "Fail"],
+      "rules": {"PASS": "Pass", "FAIL": "Fail"}
+    }
+  }
+}

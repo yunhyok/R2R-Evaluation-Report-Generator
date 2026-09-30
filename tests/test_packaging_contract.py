@@ -6,13 +6,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_runtime_dependencies_are_exact_and_lightweight() -> None:
+def test_runtime_dependencies_are_exact_pins() -> None:
     with (ROOT / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)["project"]
-    assert project["dependencies"] == ["PySide6==6.11.1", "openpyxl==3.1.5"]
+    # scipy (and its numpy dependency) was adopted on 2026-09-30 for the association
+    # statistics; everything stays exactly pinned for reproducible installers.
+    assert project["dependencies"] == [
+        "PySide6==6.11.1",
+        "openpyxl==3.1.5",
+        "numpy==2.5.3",
+        "scipy==1.18.1",
+    ]
     text = "\n".join(project["dependencies"]).casefold()
-    for forbidden in ("pandas", "numpy", "torch", "scikit", "sklearn"):
+    for forbidden in ("pandas", "torch", "scikit", "sklearn", "matplotlib"):
         assert forbidden not in text
+    package_data = tomllib.load((ROOT / "pyproject.toml").open("rb"))["tool"]["setuptools"]
+    assert package_data["package-data"]["r2r_evaluation_report.schemes"] == ["*.json"]
 
 
 def test_installer_uses_production_and_disposable_contracts() -> None:

@@ -13,6 +13,8 @@ authors = [{name = "Yunhyok"}]
 dependencies = [
     "PySide6==6.11.1",
     "openpyxl==3.1.5",
+    "numpy==2.5.3",
+    "scipy==1.18.1",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +33,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"r2r_evaluation_report.schemes" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
