@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create the v<package version> tag and GitHub release from this ref"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -67,13 +72,20 @@ jobs:
             dist/installer/*.exe
             dist/installer/*.sha256
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
+          $version = (python -c "from r2r_evaluation_report import __version__; print(__version__)").Trim()
+          $tag = "v$version"
           $setup = "dist/installer/R2R-Evaluation-Report-Generator-$version-setup.exe"
-          gh release create "${{ github.ref_name }}" $setup "$setup.sha256" `
-            --title "R2R Evaluation Report Generator ${{ github.ref_name }}" `
-            --notes-file release_notes.md --verify-tag
+          $existing = gh release view $tag --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists." }
+          if ("${{ github.ref }}" -like 'refs/tags/*') {
+            gh release create $tag $setup "$setup.sha256" --title "R2R Evaluation Report Generator $tag" --notes-file release_notes.md --verify-tag
+          } else {
+            # workflow_dispatch: the release creates the tag on the dispatched commit.
+            gh release create $tag $setup "$setup.sha256" --title "R2R Evaluation Report Generator $tag" --notes-file release_notes.md --target "${{ github.sha }}"
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
