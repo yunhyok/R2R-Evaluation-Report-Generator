@@ -38,7 +38,7 @@ from .core import (
     parse_dataset,
     propose_mappings,
 )
-from .schemes import EXCLUDE, SchemeRegistry, load_registry
+from .schemes import EXCLUDE, WILDCARD, SchemeRegistry, load_registry
 
 ComparisonKind = Literal["reference", "association"]
 PROFILE_SCHEMA_VERSION = 1
@@ -277,6 +277,18 @@ class ReportProfile:
                     raise ProfileError(
                         f"comparison {comparison.id!r} references unknown dataset {side!r}"
                     )
+        seen_samples: set[str] = set()
+        used: dict[str, set[str]] = defaultdict(set)
+        for alignment in self.alignments:
+            if alignment.sample in seen_samples:
+                raise ProfileError(f"sample {alignment.sample!r} is aligned twice")
+            seen_samples.add(alignment.sample)
+            for dataset_id, sheet in alignment.members.items():
+                if dataset_id not in known:
+                    raise ProfileError(f"alignment references unknown dataset {dataset_id!r}")
+                if sheet in used[dataset_id]:
+                    raise ProfileError(f"{dataset_id!r} sheet {sheet!r} is aligned to two samples")
+                used[dataset_id].add(sheet)
 
     @property
     def primary(self) -> DatasetSpec:
@@ -446,6 +458,7 @@ def join_aligned(
         for dataset_id, dataset in datasets.items()
     }
     grid = datasets[profile.primary.id].grid
+    canonical = {dataset_id: dataset.canonical_map for dataset_id, dataset in datasets.items()}
     samples: list[SampleData] = []
     for alignment in alignments:
         per_dataset: dict[str, dict[tuple[int, int], R2RRecord]] = {}
@@ -455,7 +468,13 @@ def join_aligned(
                 raise ProfileError(
                     f"alignment {alignment.sample!r}: {dataset_id}:{title} not found"
                 )
-            per_dataset[dataset_id] = {record.coordinate: record for record in sheet.records}
+            spelling = canonical[dataset_id]
+            per_dataset[dataset_id] = {
+                record.coordinate: replace(
+                    record, value=spelling.get(_normalise(record.value), record.value)
+                )
+                for record in sheet.records
+            }
         coordinates = sorted({key for table in per_dataset.values() for key in table})
         records = tuple(
             MultiRecord(
@@ -526,12 +545,18 @@ def _map_value(
     raw: str, mapping: Mapping[str, str], exclude: Iterable[str]
 ) -> tuple[str | None, bool]:
     """Return ``(category, dropped)``; ``category`` is ``None`` when unmapped."""
-    if _normalise(raw) in {_normalise(item) for item in exclude}:
+    key = _normalise(raw)
+    if not key:
+        return None, False
+    if key in {_normalise(item) for item in exclude}:
         return None, True
     if not mapping:
         return raw, False
-    lookup = {_normalise(key): value for key, value in mapping.items()}
-    target = lookup.get(_normalise(raw), lookup.get("*"))
+    lookup = {
+        (WILDCARD if str(item).strip() == WILDCARD else _normalise(item)): value
+        for item, value in mapping.items()
+    }
+    target = lookup.get(key, lookup.get(WILDCARD))
     if target is None:
         return None, False
     if target == EXCLUDE:
@@ -572,6 +597,13 @@ def _pairs_for(
         if drop_a or drop_b:
             excluded += 1
             continue
+        if spec.kind == "reference":
+            # A category outside the declared axis cannot be placed in the matrix; treat it
+            # as a coverage gap so the run blocks instead of raising deep inside _metrics.
+            if cat_a is not None and cat_a not in spec.categories:
+                cat_a = None
+            if cat_b is not None and cat_b not in spec.categories:
+                cat_b = None
         if cat_a is None:
             unmapped_a.add(raw_a)
         if cat_b is None:
@@ -632,6 +664,18 @@ def evaluate_comparison(
     raw_b = tuple(orders.get(spec.b) or datasets[spec.b].raw_labels)
     labels_a = _label_order(spec, spec.mapping_a, spec.exclude_a, raw_a)
     labels_b = _label_order(spec, spec.mapping_b, spec.exclude_b, raw_b)
+    for cell in spec.cells:
+        for side, wanted, available in (
+            ("A", cell.labels_a, labels_a),
+            ("B", cell.labels_b, labels_b),
+        ):
+            known = {_normalise(label) for label in available}
+            unknown = [label for label in wanted if _normalise(label) not in known]
+            if unknown:
+                raise ProfileError(
+                    f"cell {cell.name!r}: side {side} label(s) not on the axis: "
+                    + ", ".join(unknown)
+                )
     per_sample: dict[str, ReferenceStats | AssociationStats] = {}
     all_pairs: list[tuple[str, str]] = []
     all_raw: list[tuple[str, str]] = []

@@ -231,6 +231,8 @@ def _cooccurrence(result: ComparisonResult, cell_index: int, raw_a, raw_b) -> st
     cat_a, cat_b = _categories(result, raw_a, raw_b)
     if cat_a == "Exclude" or cat_b == "Exclude":
         return "Excluded"
+    if cat_a is None or cat_b is None:
+        return "Missing"
     cell = spec.cells[cell_index]
     keys_a = {_normalise(x) for x in cell.labels_a}
     keys_b = {_normalise(x) for x in cell.labels_b}
@@ -369,7 +371,9 @@ def _label_audit(wb: Workbook, result: ProfileResult) -> None:
     row = 4
     for spec in result.profile.datasets:
         dataset = result.datasets[spec.id]
-        counts = Counter(record.value for sheet in dataset.sheets for record in sheet.records)
+        counts = Counter(
+            dataset.canonical(record.value) for sheet in dataset.sheets for record in sheet.records
+        )
         total = sum(counts.values())
         extra = {_normalise(x) for x in result.unregistered.get(spec.id, ())}
         for label in result.labels(spec.id):
@@ -427,7 +431,12 @@ def _joined(wb: Workbook, result: ProfileResult) -> None:
                 raw_a = record.value(comparison.spec.a)
                 raw_b = record.value(comparison.spec.b)
                 cat_a, cat_b = _categories(comparison, raw_a, raw_b)
-                values += [cat_a, cat_b, _outcome(comparison, raw_a, raw_b)]
+                outcome = (
+                    _outcome(comparison, raw_a, raw_b)
+                    if comparison.spec.kind == "reference"
+                    else None
+                )
+                values += [cat_a, cat_b, outcome]
                 if comparison.spec.kind == "association":
                     values += [
                         _cooccurrence(comparison, index, raw_a, raw_b)
@@ -662,7 +671,8 @@ def _association_block(ws: Any, row: int, title: str, stats: AssociationStats) -
     table = stats.table
     end = _write_crosstab(ws, row, 1, f"{title} — counts", table, corner="A \\ B")
     row_pct = [
-        [c / (rt or 1) for c in r] for r, rt in zip(table.counts, table.row_totals, strict=True)
+        [None if rt == 0 else c / rt for c in r]
+        for r, rt in zip(table.counts, table.row_totals, strict=True)
     ]
     end = _write_crosstab(
         ws,
@@ -675,7 +685,13 @@ def _association_block(ws: Any, row: int, title: str, stats: AssociationStats) -
         number_format="0.0%",
         totals=False,
     )
-    col_pct = [[c / (table.column_totals[j] or 1) for j, c in enumerate(r)] for r in table.counts]
+    col_pct = [
+        [
+            None if table.column_totals[j] == 0 else c / table.column_totals[j]
+            for j, c in enumerate(r)
+        ]
+        for r in table.counts
+    ]
     end = _write_crosstab(
         ws,
         end + 1,
@@ -942,7 +958,9 @@ def _summary(wb: Workbook, result: ProfileResult) -> None:
     first_dataset_rows: tuple[int, int] | None = None
     for spec in result.profile.datasets:
         dataset = result.datasets[spec.id]
-        counts = Counter(record.value for sheet in dataset.sheets for record in sheet.records)
+        counts = Counter(
+            dataset.canonical(record.value) for sheet in dataset.sheets for record in sheet.records
+        )
         total = sum(counts.values())
         start = row
         for label in result.labels(spec.id):

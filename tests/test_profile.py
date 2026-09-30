@@ -396,3 +396,98 @@ def test_three_dataset_association_flags_unmapped_and_reports_cells(tmp_path: Pa
         (profile.DatasetSpec("elec", str(measurement), "electrical_gt", "legacy_electrical"),)
     )
     assert "E-Normal" in profile.evaluate_profile(wrong_scheme, registry=registry).errors[0]
+
+
+# ------------------------------------------------------- review regressions (2026-09-30)
+
+
+def test_map_value_wildcard_blank_and_reference_axis_guard() -> None:
+    rules = {"Pass": "Pass", "*": "Fail"}
+    assert profile._map_value("Open", rules, ()) == ("Fail", False)
+    assert profile._map_value("pass", rules, ()) == ("Pass", False)
+    assert profile._map_value("--", rules, ()) == (None, False)  # blank key never matches "*"
+    assert profile._map_value("Open", {}, ("open",)) == (None, True)
+    assert profile._map_value("Open", {"Open": schemes.EXCLUDE}, ()) == (None, True)
+
+
+def _grid_csv(path: Path, name: str, column: str, values) -> Path:
+    return _csv(path, _rows(name, column, values))
+
+
+def test_spelling_variants_are_one_label_everywhere(tmp_path: Path) -> None:
+    spellings = ("Pass", "PASS", "pass", "Open", "Short")
+    a = _grid_csv(tmp_path / "a.csv", "s1", "Status", lambda i, _r, _n: spellings[i % 5])
+    b = _grid_csv(tmp_path / "b.csv", "s1", "label", lambda i, _r, _n: ("GOOD", "BAD")[i % 2])
+    spec = profile.ReportProfile(
+        (profile.DatasetSpec("a", str(a)), profile.DatasetSpec("b", str(b))),
+        (
+            profile.ComparisonSpec(
+                "cross",
+                "association",
+                "a",
+                "b",
+                cells=(profile.CellSpec("pass x bad", ("PASS",), ("bad",)),),
+            ),
+        ),
+    )
+    result = profile.evaluate_profile(spec, registry=schemes.load_registry(user_path="/none"))
+    assert not result.blocked, result.errors
+    table = result.comparisons[0].overall.table
+    assert table.labels_a == ("Pass", "Open", "Short")
+    assert table.row_totals[0] == sum(1 for i in range(988) if i % 5 in (0, 1, 2))
+    assert result.samples[0].records[1].value("a") == "Pass"  # canonical spelling at join time
+    cell = result.comparisons[0].overall.cells[0]
+    assert cell.a + cell.b == table.row_totals[0]  # case-insensitive cell match
+    from r2r_evaluation_report.workbook import generate_workbook
+
+    generate_workbook(tmp_path / "out.xlsx", result)  # palette lookup no longer raises
+
+
+def test_reference_category_outside_axis_blocks_instead_of_raising(tmp_path: Path) -> None:
+    a = _grid_csv(tmp_path / "a.csv", "s1", "Status", lambda i, _r, _n: LEGACY[i % 6])
+    b = _grid_csv(tmp_path / "b.csv", "s1", "prediction", lambda i, _r, _n: "Normal")
+    spec = profile.ReportProfile(
+        (profile.DatasetSpec("a", str(a)), profile.DatasetSpec("b", str(b))),
+        (
+            profile.ComparisonSpec(
+                "ref",
+                "reference",
+                "a",
+                "b",
+                mapping_a={"Pass": "Pass", "*": "Fail"},
+                mapping_b={"Normal": "Normal"},
+                categories=("Pass", "Fail"),
+            ),
+        ),
+    )
+    result = profile.evaluate_profile(spec, registry=schemes.load_registry(user_path="/none"))
+    assert result.blocked and result.comparisons[0].unmapped_b == ("Normal",)
+
+
+def test_profile_rejects_duplicate_alignments_and_unknown_cell_labels(tmp_path: Path) -> None:
+    datasets = (profile.DatasetSpec("a", "a.csv"), profile.DatasetSpec("b", "b.csv"))
+    twice = profile.AlignmentSpec("s1", {"a": "s1", "b": "s1"})
+    with pytest.raises(profile.ProfileError, match="aligned twice"):
+        profile.ReportProfile(datasets, (), (twice, twice))
+    with pytest.raises(profile.ProfileError, match="two samples"):
+        profile.ReportProfile(
+            datasets,
+            (),
+            (twice, profile.AlignmentSpec("s2", {"a": "s2", "b": "s1"})),
+        )
+    a = _grid_csv(tmp_path / "a.csv", "s1", "Status", lambda i, _r, _n: LEGACY[i % 6])
+    b = _grid_csv(tmp_path / "b.csv", "s1", "label", lambda i, _r, _n: ("GOOD", "BAD")[i % 2])
+    spec = profile.ReportProfile(
+        (profile.DatasetSpec("a", str(a)), profile.DatasetSpec("b", str(b))),
+        (
+            profile.ComparisonSpec(
+                "cross",
+                "association",
+                "a",
+                "b",
+                cells=(profile.CellSpec("typo", ("Nope",), ("BAD",)),),
+            ),
+        ),
+    )
+    result = profile.evaluate_profile(spec, registry=schemes.load_registry(user_path="/none"))
+    assert result.blocked and "not on the axis" in result.errors[0]

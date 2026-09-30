@@ -33,6 +33,8 @@ References
 from __future__ import annotations
 
 import math
+import re
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -41,6 +43,13 @@ import numpy as np
 from scipy import stats
 
 Z95 = 1.959963984540054
+
+
+def _key(label: object) -> str:
+    """Case/spacing/punctuation-insensitive label key (same rule as :mod:`core`)."""
+    return re.sub(r"[^a-z0-9]+", "", unicodedata.normalize("NFKC", str(label)).casefold())
+
+
 COCHRAN_MIN_EXPECTED = 5.0
 COCHRAN_MAX_LOW_FRACTION = 0.2
 
@@ -265,14 +274,14 @@ def collapse(
     table: ContingencyTable, labels_a: Iterable[str], labels_b: Iterable[str], name: str
 ) -> TwoByTwo:
     """Collapse ``table`` into ``A in labels_a`` x ``B in labels_b``."""
-    set_a = set(labels_a)
-    set_b = set(labels_b)
+    set_a = {_key(label) for label in labels_a}
+    set_b = {_key(label) for label in labels_b}
     a = b = c = d = 0
     for i, label_a in enumerate(table.labels_a):
         for j, label_b in enumerate(table.labels_b):
             count = table.counts[i][j]
-            in_a = label_a in set_a
-            in_b = label_b in set_b
+            in_a = _key(label_a) in set_a
+            in_b = _key(label_b) in set_b
             if in_a and in_b:
                 a += count
             elif in_a:

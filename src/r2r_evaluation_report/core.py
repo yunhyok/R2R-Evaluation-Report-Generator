@@ -196,12 +196,21 @@ class ParsedDataset:
 
     @property
     def raw_labels(self) -> tuple[str, ...]:
-        """Distinct raw label spellings in first-seen order."""
+        """Distinct raw labels (case/spacing-insensitive) in first-seen spelling and order."""
+        return tuple(self.canonical_map.values())
+
+    @property
+    def canonical_map(self) -> dict[str, str]:
+        """``_normalise(label)`` -> first-seen spelling."""
         seen: dict[str, str] = {}
         for sheet in self.sheets:
             for record in sheet.records:
                 seen.setdefault(_normalise(record.value), record.value)
-        return tuple(seen.values())
+        return seen
+
+    def canonical(self, raw: str) -> str:
+        """First-seen spelling of ``raw`` so ``Pass``/``PASS``/``pass`` count as one label."""
+        return self.canonical_map.get(_normalise(raw), raw)
 
 
 @dataclass(frozen=True)

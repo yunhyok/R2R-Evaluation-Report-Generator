@@ -171,3 +171,36 @@ def test_label_styles_keep_known_palettes_and_unique_codes() -> None:
     assert styles["E-Normal"] == ("EN", "00FFFF") and styles["E-Invalid"] == ("EI", "7030A0")
     assert styles["Custom A"][0] != styles["Custom B"][0]
     assert len({code for code, _ in styles.values()}) == 4
+
+
+def test_zero_margin_percentages_and_association_outcome_are_na(tmp_path, result) -> None:
+    unused_target = profile.ComparisonSpec(
+        "assoc_mapped",
+        "association",
+        "elec",
+        "human",
+        mapping_a={
+            "E-Normal": "Good",
+            "E-NoActive": "Good",
+            "E-Open": "Open",
+            "E-Short": "Bad",
+            "E-Invalid": "Bad",
+            "never": "Weird",
+        },
+        mapping_b={"GOOD": "Good", "BAD": "Bad", "OPEN": "Open"},
+    )
+    spec = profile.ReportProfile(
+        result.profile.datasets, (unused_target,), result.profile.alignments
+    )
+    evaluated = profile.evaluate_profile(spec, result.datasets)
+    assert not evaluated.blocked, evaluated.errors
+    wb = load_workbook(generate_workbook(tmp_path / "zero.xlsx", evaluated))
+    sheet = wb["C01"]
+    rows = {sheet.cell(r, 1).value: r for r in range(1, sheet.max_row + 1)}
+    header = rows["Overall — row % (share of each A label)"]
+    weird_row = next(r for r in range(header, header + 8) if sheet.cell(r, 1).value == "Weird")
+    assert sheet.cell(weird_row, 2).value == "N/A"
+    joined = wb["Joined_Data"]
+    headers = [joined.cell(3, c).value for c in range(1, joined.max_column + 1)]
+    outcome_col = headers.index("assoc_mapped: outcome") + 1
+    assert joined.cell(4, outcome_col).value == "N/A"
