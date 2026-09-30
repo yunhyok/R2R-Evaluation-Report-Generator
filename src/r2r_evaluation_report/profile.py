@@ -515,6 +515,11 @@ class ProfileResult:
     errors: tuple[str, ...]
     unregistered: Mapping[str, tuple[str, ...]]
     sources: Mapping[str, tuple[SourceMetadata, ...]]
+    label_orders: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def labels(self, dataset_id: str) -> tuple[str, ...]:
+        """Raw labels of a dataset in scheme order (registered) or first-seen order."""
+        return self.label_orders.get(dataset_id) or self.datasets[dataset_id].raw_labels
 
 
 def _map_value(
@@ -617,10 +622,16 @@ def _association_stats(
 
 
 def evaluate_comparison(
-    spec: ComparisonSpec, samples: Sequence[SampleData], datasets: Mapping[str, ParsedDataset]
+    spec: ComparisonSpec,
+    samples: Sequence[SampleData],
+    datasets: Mapping[str, ParsedDataset],
+    orders: Mapping[str, Sequence[str]] | None = None,
 ) -> ComparisonResult:
-    labels_a = _label_order(spec, spec.mapping_a, spec.exclude_a, datasets[spec.a].raw_labels)
-    labels_b = _label_order(spec, spec.mapping_b, spec.exclude_b, datasets[spec.b].raw_labels)
+    orders = orders or {}
+    raw_a = tuple(orders.get(spec.a) or datasets[spec.a].raw_labels)
+    raw_b = tuple(orders.get(spec.b) or datasets[spec.b].raw_labels)
+    labels_a = _label_order(spec, spec.mapping_a, spec.exclude_a, raw_a)
+    labels_b = _label_order(spec, spec.mapping_b, spec.exclude_b, raw_b)
     per_sample: dict[str, ReferenceStats | AssociationStats] = {}
     all_pairs: list[tuple[str, str]] = []
     all_raw: list[tuple[str, str]] = []
@@ -664,6 +675,29 @@ def evaluate_comparison(
         labels_a,
         labels_b,
     )
+
+
+def label_orders(
+    profile: ReportProfile,
+    datasets: Mapping[str, ParsedDataset],
+    registry: SchemeRegistry | None = None,
+) -> dict[str, tuple[str, ...]]:
+    """Raw labels per dataset ordered by the declared scheme, then any extras as seen."""
+    registry = registry or load_registry()
+    orders: dict[str, tuple[str, ...]] = {}
+    for spec in profile.datasets:
+        observed = datasets[spec.id].raw_labels
+        if not spec.scheme:
+            orders[spec.id] = observed
+            continue
+        scheme = registry.scheme(spec.scheme)
+        by_key = {_normalise(label): label for label in observed}
+        ordered = [
+            by_key[_normalise(label)] for label in scheme.labels if _normalise(label) in by_key
+        ]
+        extras = [label for label in observed if scheme.canonical(label) is None]
+        orders[spec.id] = tuple(ordered + extras)
+    return orders
 
 
 def unregistered_labels(
@@ -714,13 +748,15 @@ def evaluate_profile(
         if datasets[spec.id].grid != profile.primary.grid:
             errors.append(f"dataset {spec.id!r} grid differs from the primary dataset grid")
     samples = join_aligned(profile, datasets, alignments) if not errors else ()
+    registry = registry or load_registry()
     unregistered = unregistered_labels(profile, datasets, registry)
+    orders = label_orders(profile, datasets, registry)
     for dataset_id, labels in unregistered.items():
         errors.append(f"dataset {dataset_id!r} has labels outside its scheme: {', '.join(labels)}")
     comparisons: list[ComparisonResult] = []
     for spec in profile.comparisons:
         try:
-            result = evaluate_comparison(spec, samples, datasets)
+            result = evaluate_comparison(spec, samples, datasets, orders)
         except (DataContractError, ValueError) as error:
             errors.append(f"comparison {spec.id!r}: {error}")
             continue
@@ -747,6 +783,7 @@ def evaluate_profile(
             dataset_id: tuple(sheet.source for sheet in dataset.sheets)
             for dataset_id, dataset in datasets.items()
         },
+        orders,
     )
 
 
