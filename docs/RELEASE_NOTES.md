@@ -1,3 +1,22 @@
+# v0.5.0
+
+- Linear five-step wizard (datasets → label schemes → comparisons → output → generate) replaces
+  the two-input screen as the default GUI; `--legacy-ui` still opens the v0.4 screen.
+- Any number of label datasets: measurement/prediction files, ImageMarker labels and
+  Printed-Device-AI-Inspector `image_path` exports (model column selectable). The grid is a
+  dataset property (default 26 × 38).
+- Label schemes and mapping presets move to `schemes/label_schemes.json` (bundled + user overlay);
+  the legacy presets reproduce the v0.2 rules exactly. Labels outside a declared scheme block the
+  run.
+- Comparisons are user-defined and omittable: `reference` (confusion matrix, F1, κ, MCC,
+  majority-class baseline) and `association` (χ², Bergsma-corrected Cramér's V, Haberman adjusted
+  residuals, Theil's U, per-cell odds ratio / Fisher / Holm, κ + PA/NA when categories are shared).
+- New workbook layout with per-sample spatial maps, agreement and co-occurrence maps, one sheet per
+  comparison, and the report profile embedded in README; `<stem>.profile.json` is saved beside the
+  output and `--profile FILE [--output X]` regenerates headlessly.
+- Runtime dependencies now include `numpy` and `scipy` (exactly pinned); the PyInstaller spec ships
+  them and the schemes JSON. Self-test additionally renders a profile report.
+
 # v0.4.0
 
 - Measurement-only and prediction-only inputs now generate 26 x 38 label maps, label counts/shares,

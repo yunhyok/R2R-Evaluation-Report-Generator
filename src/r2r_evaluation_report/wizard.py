@@ -268,6 +268,8 @@ class ComparisonDialog(QDialog):
 
     def _fill_mapping_table(self, side, labels, mapping, targets) -> None:
         table: QTableWidget = self.side_widgets[side]["table"]
+        table.clearContents()
+        table.setRowCount(0)
         table.setRowCount(len(labels))
         choices = [*targets, EXCLUDE] if EXCLUDE not in targets else list(targets)
         for row, label in enumerate(labels):
@@ -822,6 +824,8 @@ class WizardWindow(QMainWindow):
         assert self.load is not None
         rows = backend.alignment_rows(specs, self.load.datasets, self.load)
         headers = ["기준 샘플", *[spec.label for spec in specs[1:]]]
+        self.alignment_table.clearContents()
+        self.alignment_table.setRowCount(0)
         self.alignment_table.setColumnCount(len(headers))
         self.alignment_table.setHorizontalHeaderLabels(headers)
         self.alignment_table.setRowCount(len(rows))
@@ -875,6 +879,8 @@ class WizardWindow(QMainWindow):
 
     def _refresh_scheme_table(self) -> None:
         specs = self.dataset_specs()
+        self.scheme_table.clearContents()
+        self.scheme_table.setRowCount(0)
         self.scheme_table.setRowCount(len(specs))
         for row, spec in enumerate(specs):
             self.scheme_table.setItem(row, 0, _item(spec.label))

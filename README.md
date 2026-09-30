@@ -1,10 +1,48 @@
 # R2R Evaluation Report Generator
 
-측정 결과와 머신러닝 prediction을 `(sample, Row, Node)` 단위로 검증하고, 인쇄소자별
-26 × 38 공간 map·confusion matrix·F1 표와 전체 요약을 하나의 Excel workbook으로
-생성하는 한국어 Windows 데스크톱 애플리케이션입니다.
-측정 데이터 또는 예측 결과 하나만 선택하면 비교 지표 없이 라벨 맵·라벨별 개수와 비율을
-정리한 단독 보고서를 생성합니다.
+전기 측정 결과, 머신러닝 prediction, 광학(육안·VLM) 라벨 등 여러 라벨 데이터셋을
+`(sample, Row, Node)` 단위로 정렬하고, 인쇄소자별 공간 map과 사용자가 고른 비교
+(자기 평가: confusion matrix·F1·κ / 교차 연관: χ²·Cramér's V·odds ratio 등)를 하나의
+Excel workbook으로 생성하는 한국어 Windows 데스크톱 애플리케이션입니다.
+
+## v0.5 단계형 워크플로
+
+기본 화면은 다섯 단계를 순서대로 진행하는 위저드입니다(이전 단계를 수정하면 이후 단계는
+무효화됩니다).
+
+1. **데이터셋** — 파일을 필요한 만큼 추가하고 역할(전기 측정 기준 / 전기 ML 예측 / 광학 육안 /
+   광학 VLM / 기타), 시트, Inspector 모델 열, 격자(기본 26 × 38)를 지정한 뒤
+   **불러오기·정렬 검사**를 실행합니다. 첫 행이 기준 데이터셋이며, 날짜·kgf·SAM 서명으로 제안된
+   샘플 정렬을 행마다 또는 **제안 전체 확인**으로 확정합니다.
+2. **라벨 체계** — 데이터셋마다 자동 식별된 체계(`legacy_electrical`, `electrical_e5`,
+   `ml_3class`, `optical_3`, …)를 확인합니다. 체계 밖 라벨이 있으면 진행이 막힙니다.
+3. **비교 정의** — 비교를 0개 이상 추가합니다. *자기 평가*는 A(정답)·B(예측)를 공통 범주로
+   매핑(프리셋 또는 직접 지정)하고, *교차 연관*은 원본 라벨 그대로 또는 매핑 후 대칭 지표와
+   관심 2×2 셀(예: `E-Invalid × BAD`)을 지정합니다.
+4. **출력 옵션** — 출력 경로, 공간 map/Joined_Data/색상 전용 사본 포함 여부, 제목. 프로파일
+   JSON으로 저장·불러오기할 수 있습니다.
+5. **생성** — 요약을 확인하고 Excel을 생성합니다. `<stem>.profile.json`이 함께 저장되며
+   `--profile FILE`로 동일 리포트를 다시 만들 수 있습니다.
+
+`--legacy-ui`는 v0.4의 두 입력 화면을 엽니다(측정·예측 비교, 단독 보고서).
+
+## 지원 입력
+
+| 출처 | 형식 | 식별 |
+|---|---|---|
+| R2R-TXT-Converter 측정 | CSV/XLSX `Name, Row, Node, Status` | 이름·좌표 |
+| R2R-Machine-Learning 예측 | CSV/XLSX `name, row, node, prediction` (+ confidence, prob_*) | 이름·좌표 |
+| ImageMarker 2.x 육안 라벨 | 측정 XLSX의 `Status` 덮어쓰기본 또는 `name,row,node,label` CSV | 이름·좌표 |
+| Printed-Device-AI-Inspector VLM 라벨 | long/matrix CSV (`image_path`, `provider:model_id` 열) | 파일명 `<name>_rgb_<row>_<node>.png` |
+
+라벨 체계와 매핑 프리셋은 `src/r2r_evaluation_report/schemes/label_schemes.json`에 있으며
+`%APPDATA%\R2R Evaluation Report Generator\label_schemes.json`으로 추가·덮어쓸 수 있습니다.
+지표 정의와 참고문헌은 [docs/METHODOLOGY.md](docs/METHODOLOGY.md)의 "Profile reports" 절을
+참조하세요.
+
+---
+
+아래는 v0.4까지의 두 입력 화면(`--legacy-ui`)에 대한 설명입니다.
 
 ## 다운로드
 
@@ -93,6 +131,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m r2r_evaluation_report --self-test
+.\.venv\Scripts\python.exe -m r2r_evaluation_report --profile run.profile.json --output run.xlsx
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 ```
 
