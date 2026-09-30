@@ -21,6 +21,8 @@ from typing import Any
 
 EXCLUDE = "Exclude"
 WILDCARD = "*"
+MISSING = "(missing)"
+"""Reserved label for a device without a usable verdict; member of every scheme."""
 USER_FILE_NAME = "label_schemes.json"
 
 
@@ -55,6 +57,8 @@ class LabelScheme:
     def canonical(self, raw: object) -> str | None:
         """Return the scheme's spelling for ``raw`` or ``None`` if unknown."""
         key = normalise(raw)
+        if key == normalise(MISSING):
+            return MISSING
         for label in self.labels:
             if normalise(label) == key:
                 return label
@@ -145,6 +149,7 @@ class SchemeRegistry:
     def identify(self, raw_labels: Iterable[str]) -> tuple[str, ...]:
         """Scheme ids whose label set covers every observed raw label (most specific first)."""
         observed = {normalise(label) for label in raw_labels if str(label).strip()}
+        observed.discard(normalise(MISSING))
         matches = [
             scheme
             for scheme in self.schemes.values()

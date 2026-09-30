@@ -16,9 +16,12 @@ from . import profile as profile_module
 from .core import (
     DataContractError,
     ParsedDataset,
+    SampleCandidate,
     _read_csv,
     discover_worksheets,
+    inspect_samples,
     inspector_model_columns,
+    selection_needed,
 )
 from .profile import (
     AlignmentProposal,
@@ -48,15 +51,123 @@ class SourceInfo:
         return bool(self.inspector_models)
 
 
+def _long_format_models(headers: Sequence[str], rows) -> list[str]:
+    """Distinct ``provider:model_id`` values of a long-format Inspector export."""
+    provider = next((h for h in headers if h and h.strip().casefold() == "provider"), None)
+    model = next((h for h in headers if h and h.strip().casefold() == "model_id"), None)
+    if not provider or not model:
+        return []
+    found: list[str] = []
+    for row in rows:
+        key = f"{row.get(provider) or ''}:{row.get(model) or ''}"
+        if key != ":" and key not in found:
+            found.append(key)
+    return found
+
+
 def inspect_source(path: str | Path) -> SourceInfo:
-    """Worksheets (xlsx) and Inspector model columns (csv) available in ``path``."""
+    """Worksheets and Inspector model identifiers (``provider:model_id``) in ``path``.
+
+    Matrix-style exports name the models in their headers; long-format exports
+    (``verdict`` column) are scanned for distinct ``provider:model_id`` pairs, so
+    the wizard always offers concrete choices.
+    """
     source = Path(path)
     if source.suffix.casefold() == ".csv":
-        headers, _rows, _encoding = _read_csv(source)
-        models = inspector_model_columns(headers)
-        return SourceInfo(str(source), ("CSV",), models)
+        headers, rows, _encoding = _read_csv(source)
+        models = list(inspector_model_columns(headers))
+        if models == ["verdict"]:
+            models = _long_format_models(headers, rows)
+        return SourceInfo(str(source), ("CSV",), tuple(models))
     infos = discover_worksheets(source, "label")
-    return SourceInfo(str(source), tuple(info.title for info in infos), ())
+    models: list[str] = []
+    long_sheets: list[str] = []
+    for info in infos:
+        columns = inspector_model_columns(info.headers)
+        if columns == ("verdict",):
+            long_sheets.append(info.title)
+            continue
+        for model in columns:
+            if model not in models:
+                models.append(model)
+    if not models and long_sheets:
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(source, read_only=True, data_only=True)
+        try:
+            worksheet = workbook[long_sheets[0]]
+            iterator = worksheet.iter_rows(values_only=True)
+            headers = [str(h) if h is not None else "" for h in next(iterator)]
+            rows = (dict(zip(headers, values, strict=False)) for values in iterator)
+            models = _long_format_models(headers, rows)
+        finally:
+            workbook.close()
+    return SourceInfo(str(source), tuple(info.title for info in infos), tuple(models))
+
+
+def inspect_dataset_samples(spec: DatasetSpec) -> tuple[SampleCandidate, ...]:
+    """Every sample block of one dataset (repeat Names and incomplete arrays included)."""
+    return inspect_samples(
+        spec.path,
+        "label",
+        spec.worksheets or None,
+        grid=spec.grid,
+        model_column=spec.model_column,
+    )
+
+
+def pending_sample_selections(
+    specs: Sequence[DatasetSpec], progress: ProgressCallback | None = None
+) -> dict[str, tuple[SampleCandidate, ...]]:
+    """Datasets whose blocks need an operator decision and carry no saved selection."""
+    pending: dict[str, tuple[SampleCandidate, ...]] = {}
+    for index, spec in enumerate(specs):
+        if spec.samples:
+            continue
+        if progress:
+            progress(int(5 + 90 * index / max(len(specs), 1)), f"{spec.label} 샘플 블록 검사 중…")
+        candidates = inspect_dataset_samples(spec)
+        if selection_needed(candidates):
+            pending[spec.id] = candidates
+    if progress:
+        progress(100, "완료")
+    return pending
+
+
+def selection_summary(candidates: Sequence[SampleCandidate]) -> dict[str, list[SampleCandidate]]:
+    """Candidates grouped by Name, in first-seen order."""
+    grouped: dict[str, list[SampleCandidate]] = {}
+    for item in candidates:
+        grouped.setdefault(item.name, []).append(item)
+    return grouped
+
+
+def validate_selection(
+    candidates: Sequence[SampleCandidate], selection: Mapping[str, str]
+) -> list[str]:
+    problems: list[str] = []
+    by_key = {item.key: item for item in candidates}
+    titles: dict[str, str] = {}
+    for key, title in selection.items():
+        item = by_key.get(key)
+        if item is None:
+            problems.append(f"알 수 없는 블록: {key}")
+            continue
+        if not item.complete:
+            problems.append(
+                f"{item.default_title}: 좌표 {item.unique_coordinates}/{item.grid_size}개 — "
+                "불완전한 블록은 포함할 수 없습니다."
+            )
+        normalised = "".join(ch for ch in title.casefold() if ch.isalnum())
+        if not normalised:
+            problems.append(f"{item.default_title}: 샘플 이름이 비어 있습니다.")
+        elif normalised in titles:
+            problems.append(f"샘플 이름 {title!r}이(가) {titles[normalised]!r}와 중복됩니다.")
+        else:
+            titles[normalised] = item.default_title
+    if not selection:
+        problems.append("포함할 샘플이 없습니다.")
+    return problems
 
 
 @dataclass(frozen=True)
@@ -129,9 +240,11 @@ def member_choices(spec: DatasetSpec, datasets: Mapping[str, ParsedDataset]) -> 
 
 
 def build_alignments(
-    profile: ReportProfile, confirmed: Iterable[tuple[str, str, str]]
+    profile: ReportProfile,
+    confirmed: Iterable[tuple[str, str, str]],
+    primary_samples: Iterable[str] = (),
 ) -> tuple[AlignmentSpec, ...]:
-    return profile_module.alignments_from_confirmed(profile, confirmed)
+    return profile_module.alignments_from_confirmed(profile, confirmed, primary_samples)
 
 
 def default_mapping(

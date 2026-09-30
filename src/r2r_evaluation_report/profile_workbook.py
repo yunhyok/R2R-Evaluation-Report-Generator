@@ -68,6 +68,7 @@ KNOWN_STYLES: dict[str, tuple[str, str]] = {
     "good": ("G", "92D050"),
     "bad": ("B", "FF0000"),
     "exclude": ("X", "BFBFBF"),
+    "missing": ("-", "F2F2F2"),
 }
 OUTCOME_STYLES = {
     "Match": ("=", "92D050"),

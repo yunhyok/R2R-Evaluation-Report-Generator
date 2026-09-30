@@ -16,6 +16,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from functools import cached_property
 from pathlib import Path
 from statistics import fmean
 from typing import Any, Literal
@@ -94,6 +95,29 @@ _VALUE_FIELD: dict[DatasetKind, str] = {
     "prediction": "prediction",
     "label": "label",
 }
+MISSING_LABEL = "(missing)"
+"""Reserved label for a device whose source has no usable verdict (e.g. a failed LLM call).
+
+It belongs to every scheme, is dropped from every comparison (counted as excluded)
+and is drawn as 'Missing' on the maps, so one failed task never disqualifies a
+whole 26 x 38 array.
+"""
+_NO_VERDICT_VALUES = frozenset(
+    {
+        "",
+        "none",
+        "null",
+        "nan",
+        "failed",
+        "unknownoutcome",
+        "skipped",
+        "cancelled",
+        "pending",
+        "running",
+        "error",
+        "timeout",
+    }
+)
 IMAGE_PATH_HEADER = "image_path"
 _IMAGE_PATH_KEY = "imagepath"  # ``_normalise(IMAGE_PATH_HEADER)``
 _IMAGE_NAME_PATTERN = re.compile(r"^(?P<name>.+)_rgb_(?P<row>\d+)_(?P<node>\d+)\.png$", re.I)
@@ -164,6 +188,8 @@ class R2RRecord:
     provenance: str | None = None
     source: str | None = None
     input_row: int | None = None
+    occurrence: int = 0
+    """0-based repeat index when the same Name re-uses coordinates within one worksheet."""
 
     @property
     def coordinate(self) -> Coordinate:
@@ -194,23 +220,78 @@ class ParsedDataset:
     sheets: tuple[ParsedSheet, ...]
     grid: Grid = DEFAULT_GRID
 
-    @property
+    @cached_property
     def raw_labels(self) -> tuple[str, ...]:
         """Distinct raw labels (case/spacing-insensitive) in first-seen spelling and order."""
         return tuple(self.canonical_map.values())
 
-    @property
+    @cached_property
     def canonical_map(self) -> dict[str, str]:
-        """``_normalise(label)`` -> first-seen spelling."""
+        """``_normalise(label)`` -> first-seen spelling (computed once; records are immutable)."""
         seen: dict[str, str] = {}
         for sheet in self.sheets:
             for record in sheet.records:
-                seen.setdefault(_normalise(record.value), record.value)
+                key = _normalise(record.value)
+                if key not in seen:
+                    seen[key] = record.value
         return seen
 
     def canonical(self, raw: str) -> str:
         """First-seen spelling of ``raw`` so ``Pass``/``PASS``/``pass`` count as one label."""
         return self.canonical_map.get(_normalise(raw), raw)
+
+
+@dataclass(frozen=True)
+class SampleCandidate:
+    """One ``(worksheet, Name, occurrence)`` block found in a source before selection.
+
+    A merged converter CSV can repeat a sample Name (the same array measured
+    twice, or two source sheets sharing a Name) and can carry incomplete arrays.
+    Candidates let the operator decide which blocks become samples instead of
+    the parser rejecting the whole file.
+    """
+
+    worksheet: str
+    name: str
+    occurrence: int
+    first_row: int
+    last_row: int
+    row_count: int
+    unique_coordinates: int
+    grid_size: int
+    label_counts: Mapping[str, int]
+    content_digest: str = ""
+    """SHA-1 of the sorted ``(row, node, label)`` triples: equal digests mean identical blocks."""
+
+    @property
+    def key(self) -> str:
+        return f"{self.worksheet}::{self.name}::{self.occurrence}"
+
+    @property
+    def complete(self) -> bool:
+        return self.unique_coordinates == self.grid_size
+
+    @property
+    def default_title(self) -> str:
+        return self.name if self.occurrence == 0 else f"{self.name} #{self.occurrence + 1}"
+
+
+def default_sample_selection(candidates: Iterable[SampleCandidate]) -> dict[str, str]:
+    """Every complete candidate under its default title (incomplete blocks are skipped)."""
+    return {item.key: item.default_title for item in candidates if item.complete}
+
+
+def selection_needed(candidates: Iterable[SampleCandidate]) -> bool:
+    """True when a Name repeats or any block is incomplete, i.e. the operator must choose."""
+    seen: set[tuple[str, str]] = set()
+    for item in candidates:
+        if not item.complete:
+            return True
+        key = (item.worksheet, _normalise(item.name))
+        if key in seen:
+            return True
+        seen.add(key)
+    return False
 
 
 @dataclass(frozen=True)
@@ -439,6 +520,8 @@ def inspector_model_columns(headers: Iterable[object]) -> tuple[str, ...]:
     names = [str(header).strip() for header in headers if header is not None]
     if not any(_normalise(name) == _IMAGE_PATH_KEY for name in names):
         return ()
+    if not any(_normalise(name) in {"verdict", "imagesha256", "agreement"} for name in names):
+        return ()  # image_path alone (e.g. a slice manifest) is not an Inspector export
     if any(_normalise(name) == "verdict" for name in names):
         return ("verdict",)
     reserved = {_IMAGE_PATH_KEY, "imagesha256", "agreement"}
@@ -502,12 +585,15 @@ def _inspector_rows(
             key = f"{row.get(provider_header, '')}:{row.get(model_header, '')}"
             if key != model_column:
                 continue
-            if status_header and _normalise(row.get(status_header)) not in {"", "succeeded"}:
-                # Failed / skipped tasks have no verdict; keep the row out of the label set.
-                continue
             value = row.get("verdict")
+            if status_header and _normalise(row.get(status_header)) not in {"", "succeeded"}:
+                value = None
         else:
             value = row.get(model_column)
+        # A task without a verdict (failed, skipped, unknown outcome) keeps its coordinate
+        # under the reserved MISSING label so the array stays complete.
+        if value is None or _normalise(value) in _NO_VERDICT_VALUES:
+            value = MISSING_LABEL
         base = image_path.replace("\\", "/").rsplit("/", 1)[-1]
         match = _IMAGE_NAME_PATTERN.match(base)
         if not match:
@@ -556,6 +642,8 @@ def discover_worksheets(
                 worksheet.iter_rows(min_row=1, max_row=50, values_only=True), start=1
             ):
                 is_contract_header = _header_map(row, kind) if kind else _infer_kind(row)
+                if not is_contract_header and kind == "label" and inspector_model_columns(row):
+                    is_contract_header = True
                 if is_contract_header:
                     found.append(
                         WorksheetInfo(
@@ -633,9 +721,18 @@ def _parse_rows(
     kind: DatasetKind,
     metadata: SourceMetadata,
     grid: Grid = DEFAULT_GRID,
+    strict: bool = True,
 ) -> tuple[R2RRecord, ...]:
+    """Parse rows into records.
+
+    ``strict`` (the historical contract) rejects a repeated coordinate and any Name
+    without exactly ``grid.size`` unique coordinates.  With ``strict=False`` a
+    repeated coordinate starts a new *occurrence* of that Name instead, and size
+    checks are deferred to sample selection (:func:`inspect_samples`).
+    """
     records: list[R2RRecord] = []
     seen_by_name: dict[str, set[Coordinate]] = defaultdict(set)
+    occurrence_by_name: dict[str, int] = defaultdict(int)
     value_field = _VALUE_FIELD[kind]
     value_name = {"status": "Status", "prediction": "prediction", "label": "label"}[value_field]
     for row_number, source_row in rows:
@@ -657,9 +754,12 @@ def _parse_rows(
         coordinate = (row, node)
         normalised_name = _normalise(name)
         if coordinate in seen_by_name[normalised_name]:
-            raise DataContractError(
-                f"{context}: duplicate coordinate ({row}, {node}) for Name {name!r}"
-            )
+            if strict:
+                raise DataContractError(
+                    f"{context}: duplicate coordinate ({row}, {node}) for Name {name!r}"
+                )
+            occurrence_by_name[normalised_name] += 1
+            seen_by_name[normalised_name] = set()
         seen_by_name[normalised_name].add(coordinate)
         confidence = (
             _optional_float(source_row.get(header_map.get("confidence")), "confidence", context)
@@ -699,6 +799,7 @@ def _parse_rows(
                 else None,
                 _as_text(source_row.get(header_map["source"])) if "source" in header_map else None,
                 row_number,
+                occurrence_by_name[normalised_name],
             )
         )
     if not seen_by_name:
@@ -706,6 +807,8 @@ def _parse_rows(
         raise DataContractError(
             f"{location}: expected at least one Name with exactly {grid.size} unique coordinates"
         )
+    if not strict:
+        return tuple(records)
     for normalised_name, coordinates in seen_by_name.items():
         if len(coordinates) != grid.size:
             missing = grid.size - len(coordinates)
@@ -717,23 +820,82 @@ def _parse_rows(
     return tuple(records)
 
 
+def _blocks(
+    records: Iterable[R2RRecord],
+) -> dict[tuple[str, int], list[R2RRecord]]:
+    """Group records by ``(normalised Name, occurrence)`` in first-seen order."""
+    grouped: dict[tuple[str, int], list[R2RRecord]] = defaultdict(list)
+    for record in records:
+        grouped[(_normalise(record.name), record.occurrence)].append(record)
+    return grouped
+
+
+def _candidates(
+    metadata: SourceMetadata, records: Iterable[R2RRecord], grid: Grid
+) -> tuple[SampleCandidate, ...]:
+    result: list[SampleCandidate] = []
+    for (_key, occurrence), group in _blocks(records).items():
+        rows = [item.input_row for item in group if item.input_row is not None]
+        result.append(
+            SampleCandidate(
+                metadata.worksheet or "CSV",
+                group[0].name,
+                occurrence,
+                min(rows) if rows else 0,
+                max(rows) if rows else 0,
+                len(group),
+                len({item.coordinate for item in group}),
+                grid.size,
+                dict(Counter(item.value for item in group)),
+                hashlib.sha1(
+                    repr(sorted((item.row, item.node, item.value) for item in group)).encode()
+                ).hexdigest()[:12],
+            )
+        )
+    return tuple(result)
+
+
 def _sample_sheets(
     kind: DatasetKind,
     metadata: SourceMetadata,
     records: tuple[R2RRecord, ...],
     header_map: Mapping[str, str],
+    grid: Grid = DEFAULT_GRID,
+    samples: Mapping[str, str] | None = None,
 ) -> tuple[ParsedSheet, ...]:
-    """Split a header-bearing input worksheet into its complete Name sample units."""
-    grouped: dict[str, list[R2RRecord]] = defaultdict(list)
-    display_names: dict[str, str] = {}
-    for record in records:
-        normalised_name = _normalise(record.name)
-        grouped[normalised_name].append(record)
-        display_names.setdefault(normalised_name, record.name)
-    return tuple(
-        ParsedSheet(kind, metadata, tuple(group), header_map, display_names[normalised_name])
-        for normalised_name, group in grouped.items()
-    )
+    """Split a worksheet into sample units.
+
+    Without ``samples`` every ``(Name, occurrence)`` block becomes a sheet titled by
+    its Name (the strict parser guarantees one complete block per Name).  With
+    ``samples`` (candidate key -> title) only the chosen blocks are kept, each must
+    be complete, and titles must be unique.
+    """
+    sheets: list[ParsedSheet] = []
+    worksheet = metadata.worksheet or "CSV"
+    seen_titles: dict[str, str] = {}
+    for (_key, occurrence), group in _blocks(records).items():
+        name = group[0].name
+        if samples is None:
+            title = name
+        else:
+            title = samples.get(f"{worksheet}::{name}::{occurrence}")
+            if title is None:
+                continue
+            title = title.strip() or name
+            unique = len({item.coordinate for item in group})
+            if unique != grid.size:
+                raise DataContractError(
+                    f"{metadata.path} [{worksheet}]: selected block {name!r} #{occurrence + 1} "
+                    f"has {unique} unique coordinates; exactly {grid.size} are required"
+                )
+            previous = seen_titles.get(_normalise(title))
+            if previous is not None:
+                raise DataContractError(
+                    f"{metadata.path} [{worksheet}]: sample title {title!r} is used twice"
+                )
+            seen_titles[_normalise(title)] = title
+        sheets.append(ParsedSheet(kind, metadata, tuple(group), header_map, title))
+    return tuple(sheets)
 
 
 def _ensure_unique_samples(sheets: Sequence[ParsedSheet]) -> None:
@@ -757,6 +919,7 @@ def parse_dataset(
     *,
     grid: Grid = DEFAULT_GRID,
     model_column: str | None = None,
+    samples: Mapping[str, str] | None = None,
 ) -> ParsedDataset:
     """Parse every selected contract-bearing worksheet into immutable records.
 
@@ -764,7 +927,39 @@ def parse_dataset(
     ImageMarker ``label`` and Inspector ``verdict`` columns, and additionally reads
     Inspector ``image_path`` exports (``model_column`` selects the model).  ``grid``
     sets the per-sample geometry; the default is the 26 x 38 contract.
+
+    ``samples`` (candidate key -> sample title, see :func:`inspect_samples`) turns on
+    lenient parsing: repeated Names and incomplete blocks no longer reject the file;
+    only the listed complete blocks become samples.  Without it the historical
+    strict contract applies.
     """
+    return _parse(path, kind, worksheets, grid, model_column, samples, inspect=False)
+
+
+def inspect_samples(
+    path: str | Path,
+    kind: DatasetKind,
+    worksheets: str | Sequence[str] | None = None,
+    *,
+    grid: Grid = DEFAULT_GRID,
+    model_column: str | None = None,
+) -> tuple[SampleCandidate, ...]:
+    """List every ``(worksheet, Name, occurrence)`` block with its completeness."""
+    return _parse(path, kind, worksheets, grid, model_column, None, inspect=True)
+
+
+def _parse(
+    path: str | Path,
+    kind: DatasetKind,
+    worksheets: str | Sequence[str] | None,
+    grid: Grid,
+    model_column: str | None,
+    samples: Mapping[str, str] | None,
+    *,
+    inspect: bool,
+) -> Any:
+    strict = samples is None and not inspect
+    found: list[SampleCandidate] = []
     source = Path(path)
     suffix = source.suffix.casefold()
     if suffix == ".xls":
@@ -783,14 +978,29 @@ def parse_dataset(
         if not header_map:
             raise DataContractError(f"CSV is missing required {kind} headers")
         metadata = _source_metadata(source, encoding=encoding, worksheet="CSV")
-        records = _parse_rows(enumerate(rows, start=2), header_map, kind, metadata, grid)
-        parsed = _sample_sheets(kind, metadata, records, header_map)
+        records = _parse_rows(enumerate(rows, start=2), header_map, kind, metadata, grid, strict)
+        if inspect:
+            return _candidates(metadata, records, grid)
+        parsed = _sample_sheets(kind, metadata, records, header_map, grid, samples)
+        if not parsed:
+            raise DataContractError(f"{source}: no sample block was selected")
         return ParsedDataset(kind, str(source), parsed, grid)
     if suffix != ".xlsx":
         raise DataContractError("only .csv and .xlsx sources are supported")
     candidates = discover_worksheets(source, kind)
     names = {worksheets} if isinstance(worksheets, str) else set(worksheets or ())
     selected = tuple(info for info in candidates if not names or info.title in names)
+    if not names and kind == "label":
+        # An Inspector .xlsx export carries the same verdicts on 'Matrix' (one row per
+        # image) and 'Results' (one row per task): reading both would duplicate every
+        # coordinate, so default to Matrix, then Results.
+        inspector = [info for info in selected if inspector_model_columns(info.headers)]
+        if inspector:
+            preferred = sorted(
+                inspector,
+                key=lambda info: {"matrix": 0, "results": 1}.get(_normalise(info.title), 2),
+            )
+            selected = (preferred[0],)
     missing_names = names - {item.title for item in candidates}
     if missing_names:
         raise DataContractError(
@@ -809,8 +1019,6 @@ def parse_dataset(
                     min_row=info.header_row, max_row=info.header_row, values_only=True
                 )
             )
-            header_map = _header_map(header_values, kind)
-            assert header_map is not None
             metadata = SourceMetadata(
                 base_metadata.path,
                 base_metadata.sha256,
@@ -818,7 +1026,7 @@ def parse_dataset(
                 base_metadata.mtime_ns,
                 worksheet=info.title,
             )
-            rows = (
+            rows: Iterable[tuple[int, Mapping[str, Any]]] = (
                 (
                     row_number,
                     {
@@ -832,9 +1040,33 @@ def parse_dataset(
                     start=info.header_row + 1,
                 )
             )
-            records = _parse_rows(rows, header_map, kind, metadata, grid)
-            parsed.extend(_sample_sheets(kind, metadata, records, header_map))
-        _ensure_unique_samples(parsed)
+            header_map = _header_map(header_values, kind)
+            if header_map is None and kind == "label" and inspector_model_columns(header_values):
+                header_names = [str(h) for h in header_values if h is not None]
+                inspector_headers, inspector_rows = _inspector_rows(
+                    header_names,
+                    [row for _number, row in rows],
+                    model_column,
+                    f"{source} [{info.title}]",
+                )
+                header_map = _header_map(inspector_headers, kind)
+                rows = enumerate(inspector_rows, start=info.header_row + 1)
+            assert header_map is not None
+            records = _parse_rows(rows, header_map, kind, metadata, grid, strict)
+            if inspect:
+                found.extend(_candidates(metadata, records, grid))
+                continue
+            parsed.extend(_sample_sheets(kind, metadata, records, header_map, grid, samples))
+        if inspect:
+            return tuple(found)
+        if samples is None:
+            _ensure_unique_samples(parsed)
+        else:
+            titles = [_normalise(sheet.title) for sheet in parsed]
+            if len(titles) != len(set(titles)):
+                raise DataContractError(f"{source}: sample titles must be unique across sheets")
+            if not parsed:
+                raise DataContractError(f"{source}: no sample block was selected")
         return ParsedDataset(kind, str(source), tuple(parsed), grid)
     finally:
         workbook.close()

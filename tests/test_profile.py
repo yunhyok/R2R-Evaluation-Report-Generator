@@ -194,8 +194,10 @@ def test_label_kind_reads_inspector_matrix_and_long_exports(tmp_path: Path) -> N
     assert core.inspector_model_columns(list(long_rows[0])) == ("verdict",)
     parsed = core.parse_dataset(long_csv, "label", model_column="openai:gpt-x")
     assert parsed.raw_labels == ("BAD",) and len(parsed.sheets[0].records) == 988
-    with pytest.raises(core.DataContractError, match="expected exactly 988"):
-        core.parse_dataset(long_csv, "label", model_column="google:gemini-y")
+    # A failed task keeps its coordinate under the reserved missing label.
+    google = core.parse_dataset(long_csv, "label", model_column="google:gemini-y")
+    assert len(google.sheets[0].records) == 988
+    assert google.raw_labels == (core.MISSING_LABEL, "GOOD")
 
 
 # ------------------------------------------------------------------------ profiles
@@ -491,3 +493,280 @@ def test_profile_rejects_duplicate_alignments_and_unknown_cell_labels(tmp_path: 
     )
     result = profile.evaluate_profile(spec, registry=schemes.load_registry(user_path="/none"))
     assert result.blocked and "not on the axis" in result.errors[0]
+
+
+# ------------------------------------------------ repeated Names / incomplete blocks
+
+
+def _merged_converter_csv(path: Path) -> Path:
+    """Mimic a merged R2R-TXT-Converter export: sam5 twice (different), sam1 twice
+    (identical), sam19 as a 190-row partial followed by a full block, sam7 clean."""
+    rows: list[dict[str, object]] = []
+
+    def block(name, values, coords=GRID):
+        for index, (row, node) in enumerate(coords):
+            rows.append({"name": name, "row": row, "node": node, "status": values(index)})
+
+    block("x_sam5", lambda i: E5[i % 5])
+    block("x_sam1", lambda i: E5[(i // 3) % 5])
+    block("x_sam7", lambda i: E5[(i // 7) % 5])
+    block("x_sam5", lambda i: E5[(i + 1) % 5])  # re-measurement, different labels
+    block("x_sam1", lambda i: E5[(i // 3) % 5])  # duplicated sheet, identical content
+    block("x_sam19", lambda i: "E-Invalid", GRID[:190])  # aborted partial
+    block("x_sam19", lambda i: E5[i % 5])
+    return _csv(path, rows)
+
+
+def test_inspect_samples_splits_occurrences_and_flags_incomplete(tmp_path: Path) -> None:
+    source = _merged_converter_csv(tmp_path / "merged.csv")
+    with pytest.raises(core.DataContractError, match="duplicate coordinate"):
+        core.parse_dataset(source, "label")  # strict contract unchanged
+    candidates = core.inspect_samples(source, "label")
+    assert [(c.name, c.occurrence, c.complete) for c in candidates] == [
+        ("x_sam5", 0, True),
+        ("x_sam1", 0, True),
+        ("x_sam7", 0, True),
+        ("x_sam5", 1, True),
+        ("x_sam1", 1, True),
+        ("x_sam19", 0, False),
+        ("x_sam19", 1, True),
+    ]
+    assert core.selection_needed(candidates)
+    by_key = {c.key: c for c in candidates}
+    assert by_key["CSV::x_sam1::0"].content_digest == by_key["CSV::x_sam1::1"].content_digest
+    assert by_key["CSV::x_sam5::0"].content_digest != by_key["CSV::x_sam5::1"].content_digest
+    partial = by_key["CSV::x_sam19::0"]
+    assert (partial.first_row, partial.last_row, partial.unique_coordinates) == (
+        2 + 5 * 988,
+        2 + 5 * 988 + 189,
+        190,
+    )
+    assert (
+        partial.default_title == "x_sam19"
+        and by_key["CSV::x_sam19::1"].default_title == "x_sam19 #2"
+    )
+    default = core.default_sample_selection(candidates)
+    assert "CSV::x_sam19::0" not in default and len(default) == 6
+    dataset = core.parse_dataset(source, "label", samples=default)
+    assert [sheet.title for sheet in dataset.sheets] == [
+        "x_sam5",
+        "x_sam1",
+        "x_sam7",
+        "x_sam5 #2",
+        "x_sam1 #2",
+        "x_sam19 #2",
+    ]
+    assert all(len(sheet.records) == 988 for sheet in dataset.sheets)
+    # Keep only the second sam5 under the plain name and drop the duplicated sam1 sheet.
+    chosen = {
+        "CSV::x_sam5::1": "x_sam5",
+        "CSV::x_sam1::0": "x_sam1",
+        "CSV::x_sam7::0": "x_sam7",
+        "CSV::x_sam19::1": "x_sam19",
+    }
+    trimmed = core.parse_dataset(source, "label", samples=chosen)
+    # Sheets keep file order: the chosen sam5 block is the one after sam7.
+    assert [sheet.title for sheet in trimmed.sheets] == ["x_sam1", "x_sam7", "x_sam5", "x_sam19"]
+    assert trimmed.sheets[2].records[0].value == E5[1]
+    with pytest.raises(core.DataContractError, match="exactly 988"):
+        core.parse_dataset(source, "label", samples={"CSV::x_sam19::0": "partial"})
+    with pytest.raises(core.DataContractError, match="used twice"):
+        core.parse_dataset(source, "label", samples={"CSV::x_sam5::0": "a", "CSV::x_sam5::1": "A"})
+    clean = _csv(tmp_path / "clean.csv", _rows("only", "Status", lambda i, _r, _n: E5[i % 5]))
+    assert not core.selection_needed(core.inspect_samples(clean, "label"))
+
+
+def test_profile_persists_sample_selection(tmp_path: Path) -> None:
+    source = _merged_converter_csv(tmp_path / "merged.csv")
+    selection = {"CSV::x_sam5::1": "x_sam5 (re)", "CSV::x_sam7::0": "x_sam7"}
+    spec = profile.ReportProfile((profile.DatasetSpec("a", str(source), samples=selection),))
+    reloaded = profile.ReportProfile.from_dict(spec.to_dict())
+    assert reloaded.datasets[0].samples == selection
+    datasets = profile.load_datasets(reloaded)
+    assert [sheet.title for sheet in datasets["a"].sheets] == ["x_sam7", "x_sam5 (re)"]
+    result = profile.evaluate_profile(reloaded, datasets, registry=schemes.load_registry("/none"))
+    assert not result.blocked and [s.sample for s in result.samples] == ["x_sam7", "x_sam5 (re)"]
+
+
+# ------------------------------------------- Inspector .xlsx export + missing verdicts
+
+
+def _inspector_xlsx(path: Path) -> Path:
+    """Mimic Printed-Device-AI-Inspector ``export_excel``: Run / Results / Matrix / Attempts."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    run = wb.active
+    run.title = "Run"
+    run.append(["field", "value"])
+    run.append(["created_at", "2026-09-29T21:45:49+00:00"])
+    results = wb.create_sheet("Results")
+    results.append(
+        [
+            "task_id",
+            "image_id",
+            "image_path",
+            "image_sha256",
+            "provider",
+            "model_id",
+            "actual_model_id",
+            "status",
+            "verdict",
+            "reason",
+            "latency_ms",
+        ]
+    )
+    matrix = wb.create_sheet("Matrix")
+    matrix.append(
+        [
+            "image_path",
+            "image_sha256",
+            "agreement",
+            "gemini:g-flash",
+            "gemini:g-flash actual_model_id",
+            "gemini:g-flash reason",
+        ]
+    )
+    for index, (row, node) in enumerate(GRID):
+        verdict = OPTICAL[index % 3]
+        status = "succeeded"
+        if index == 7:  # one failed LLM call
+            verdict, status = None, "unknown_outcome"
+        image = (
+            f"V:\\samples\\260619 p3meemt 7kgf 100mm, SAM 3_slices\\"
+            f"260619 p3meemt 7kgf 100mm, SAM 3_rgb_{row:02d}_{node:02d}.png"
+        )
+        results.append(
+            [
+                f"t{index}",
+                f"i{index}",
+                image,
+                f"sha{index}",
+                "gemini",
+                "g-flash",
+                "g-flash",
+                status,
+                verdict,
+                "reason",
+                100,
+            ]
+        )
+        matrix.append(
+            [
+                image,
+                f"sha{index}",
+                "single",
+                verdict if status == "succeeded" else status,
+                "g-flash",
+                "reason",
+            ]
+        )
+    wb.create_sheet("Attempts").append(["id", "task_id", "status"])
+    wb.save(path)
+    return path
+
+
+def test_inspector_xlsx_export_is_read_from_matrix_with_missing_verdict(tmp_path: Path) -> None:
+    from r2r_evaluation_report.wizard_backend import inspect_source
+
+    source = _inspector_xlsx(tmp_path / "inspector.xlsx")
+    assert [i.title for i in core.discover_worksheets(source, "label")] == ["Results", "Matrix"]
+    info = inspect_source(source)
+    assert info.inspector_models == ("gemini:g-flash",) and info.is_inspector
+    dataset = core.parse_dataset(source, "label", model_column="gemini:g-flash")
+    assert [s.title for s in dataset.sheets] == ["260619 p3meemt 7kgf 100mm, SAM 3"]
+    assert len(dataset.sheets[0].records) == 988 and dataset.sheets[0].source.worksheet == "Matrix"
+    assert set(dataset.raw_labels) == {"GOOD", "BAD", "OPEN", core.MISSING_LABEL}
+    assert dataset.sheets[0].records[7].value == core.MISSING_LABEL
+    via_results = core.parse_dataset(source, "label", "Results", model_column="gemini:g-flash")
+    assert [r.value for r in via_results.sheets[0].records] == [
+        r.value for r in dataset.sheets[0].records
+    ]
+    registry = schemes.load_registry(user_path="/none")
+    assert registry.identify(dataset.raw_labels) == ("optical_3",)
+    assert registry.scheme("optical_3").canonical(core.MISSING_LABEL) == schemes.MISSING
+    # The missing coordinate is excluded from comparisons and drawn as Missing on maps.
+    elec = _csv(
+        tmp_path / "elec.csv",
+        _rows("260619 p3meemt 7kgf 100mm, SAM 3", "Status", lambda i, _r, _n: E5[i % 5]),
+    )
+    spec = profile.ReportProfile(
+        (
+            profile.DatasetSpec("elec", str(elec), "electrical_gt", "electrical_e5"),
+            profile.DatasetSpec(
+                "vlm", str(source), "optical_vlm", "optical_3", model_column="gemini:g-flash"
+            ),
+        ),
+        (
+            profile.ComparisonSpec(
+                "cross",
+                "association",
+                "elec",
+                "vlm",
+                cells=(profile.CellSpec("inv x bad", ("E-Invalid",), ("BAD",)),),
+            ),
+            profile.ComparisonSpec(
+                "ref",
+                "reference",
+                "vlm",
+                "elec",
+                mapping_a=registry.preset("optical_to_3class").resolved_rules(OPTICAL),
+                mapping_b=registry.preset("e5_to_3class").resolved_rules(E5),
+                categories=("Normal", "Open", "Short"),
+            ),
+        ),
+    )
+    result = profile.evaluate_profile(spec, registry=registry)
+    assert not result.blocked, result.errors
+    cross, ref = result.comparisons
+    assert cross.overall.pairs == 987 and cross.overall.excluded == 1
+    assert cross.overall.table.labels_b == ("GOOD", "BAD", "OPEN")  # (missing) not an axis
+    assert ref.overall.pairs + ref.overall.excluded == 988
+    assert result.labels("vlm")[-1] == core.MISSING_LABEL
+    from openpyxl import load_workbook
+
+    from r2r_evaluation_report.workbook import generate_workbook
+
+    wb = load_workbook(generate_workbook(tmp_path / "vlm.xlsx", result))
+    maps = wb["S01"]
+    # second map block (vlm raw labels) starts at row 8 + 36; row 1 node 8 is the missing one
+    assert maps.cell(8 + 36 + 1, 3 + 8).value == "-"
+
+
+def test_canonical_map_is_cached_not_rescanned() -> None:
+    from time import perf_counter
+
+    records = tuple(
+        core.R2RRecord("s", row, node, "Pass" if (row + node) % 2 else "PASS") for row, node in GRID
+    )
+    dataset = core.ParsedDataset(
+        "label", "x", (core.ParsedSheet("label", core.SourceMetadata("x", "", 0, 0), records, {}),)
+    )
+    start = perf_counter()
+    for record in records:
+        assert dataset.canonical(record.value) == "PASS"  # first-seen spelling: (1, 1) is even
+    assert perf_counter() - start < 0.5  # was O(n^2): ~20 s for one 988-record sheet
+
+
+def test_primary_samples_without_partner_keep_their_maps(tmp_path: Path) -> None:
+    a = _csv(
+        tmp_path / "a.csv",
+        _rows("s1", "Status", lambda i, _r, _n: E5[i % 5])
+        + _rows("s2", "Status", lambda i, _r, _n: E5[(i + 1) % 5]),
+    )
+    b = _grid_csv(tmp_path / "b.csv", "s1", "label", lambda i, _r, _n: OPTICAL[i % 3])
+    datasets = (profile.DatasetSpec("a", str(a)), profile.DatasetSpec("b", str(b)))
+    spec = profile.ReportProfile(
+        datasets,
+        (profile.ComparisonSpec("x", "association", "a", "b"),),
+    )
+    result = profile.evaluate_profile(spec, registry=schemes.load_registry("/none"))
+    assert [s.sample for s in result.samples] == ["s1", "s2"]
+    assert result.samples[1].members == {"a": "s2"}
+    assert result.comparisons[0].overall.pairs == 988
+    assert list(result.comparisons[0].per_sample) == ["s1"]
+    confirmed = profile.alignments_from_confirmed(spec, [("b", "s1", "s1")], ["s1", "s2"])
+    assert [(x.sample, dict(x.members)) for x in confirmed] == [
+        ("s1", {"a": "s1", "b": "s1"}),
+        ("s2", {"a": "s2"}),
+    ]
