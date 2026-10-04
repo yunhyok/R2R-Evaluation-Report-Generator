@@ -156,6 +156,33 @@ co-occurrence map per selected 2 × 2 cell (Both / A only / B only / Neither). M
 blocks. The color-only sibling clears only the map bodies. Verification reopens both files and
 checks sheet order, map axes for the recorded grid, fills, and comparison titles.
 
+### Comparison groups and the Local LLM group (v0.6.0)
+
+Every dataset carries a **role** — the comparison group it stands in: `electrical_gt`
+(measured electrical status, the reference), `electrical_ml` (image-ML prediction of that
+status), `optical_human` (ImageMarker labels), `optical_vlm` (Printed-Device-AI-Inspector verdicts
+from a cloud API model), `optical_vlm_local` (Inspector verdicts from a model served on the
+operator's own hardware through the Inspector's LM Studio provider, or another local provider id:
+`lmstudio`, `ollama`, `llamacpp`, `vllm`, `local`) and `other`. The role never changes parsing or
+scoring; it records what was compared with what, and the README sheet (*Comparison group*,
+*Provider* columns) and the Overall Summary (*Comparison groups* block) report it. The wizard
+pre-selects the role of an Inspector dataset from the provider of the chosen `provider:model_id`
+column; one export may be added once per model so that each model is its own group.
+
+Local and cloud VLM verdicts are kept in separate groups rather than pooled because they differ in
+ways that matter for interpretation even when prompt, label set and images are identical: a local
+open-weight model is fully reproducible (fixed weights and quantisation, recorded by the Inspector as
+`actual_model_id`, e.g. `qwen2.5-vl-7b-instruct@q6_k`), costs nothing per call and keeps the
+images on site, whereas a cloud model may change behind a stable name and is rate-limited.
+Statistically the Local LLM group is treated exactly like the cloud group: *association*
+comparisons (Cramér's V with bias correction, Theil's U, adjusted residuals, 2×2 odds ratios) for
+electrical × Local LLM, and *reference* comparisons (accuracy, macro F1, Cohen's κ, MCC) with the
+human labels as the reference for human × Local LLM. Cloud × Local LLM agreement is an
+*association* comparison whose κ row is the inter-rater agreement between the two models; because
+neither model is a ground truth, κ (Cohen 1960; Landis & Koch 1977 benchmarks) rather than accuracy
+is the headline there. Pre-specify which cells and thresholds decide the comparison before the data
+arrive — the report records the profile so the pre-specification is auditable.
+
 ### Sample blocks, repeated Names and missing verdicts (v0.5.1)
 
 Within one worksheet a Name is split into *occurrences*: a coordinate that repeats starts a new

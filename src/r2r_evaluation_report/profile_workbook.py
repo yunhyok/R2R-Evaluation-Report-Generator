@@ -26,13 +26,17 @@ from openpyxl.worksheet.pagebreak import Break
 from . import association as assoc
 from .core import _normalise
 from .profile import (
+    ROLE_TITLES,
     AssociationStats,
     ComparisonResult,
+    DatasetSpec,
     ProfileResult,
     ReferenceStats,
     SampleData,
     _map_value,
+    role_title,
 )
+from .schemes import MISSING
 from .workbook import (
     MAP_BORDER,
     WorkbookCancelled,
@@ -252,6 +256,61 @@ def _dataset_title(result: ProfileResult, dataset_id: str) -> str:
     return result.profile.dataset(dataset_id).label
 
 
+def _provider_text(spec: DatasetSpec) -> str:
+    """``lmstudio (local)`` / ``gemini (cloud)`` / '' for non-Inspector datasets."""
+    provider = spec.provider
+    if provider is None:
+        return "local" if spec.role == "optical_vlm_local" else ""
+    return f"{provider} ({'local' if spec.is_local_llm else 'cloud'})"
+
+
+def _comparison_groups(ws, row: int, result: ProfileResult) -> int:
+    """'Comparison groups' block: which datasets stand in which group, with provider/model."""
+    _set_section(ws.cell(row, 1), "Comparison groups (dataset roles)")
+    headers = ("Group", "Dataset", "Provider", "Model", "Scheme", "Samples", "Labels")
+    for col, header in enumerate(headers, 1):
+        ws.cell(row + 1, col, header)
+    _style_header_row(ws, row + 1, 1, len(headers))
+    row += 2
+    order = list(ROLE_TITLES)
+    specs = sorted(
+        result.profile.datasets,
+        key=lambda spec: (order.index(spec.role) if spec.role in order else len(order)),
+    )
+    for spec in specs:
+        dataset = result.datasets[spec.id]
+        labelled = sum(
+            1
+            for sheet in dataset.sheets
+            for record in sheet.records
+            if dataset.canonical(record.value) != MISSING
+        )
+        values = (
+            role_title(spec.role),
+            spec.label,
+            _provider_text(spec),
+            spec.model_column or "",
+            spec.scheme or "(unregistered)",
+            len(dataset.sheets),
+            labelled,
+        )
+        for col, value in enumerate(values, 1):
+            ws.cell(row, col, value)
+        row += 1
+    local = [spec for spec in result.profile.datasets if spec.is_local_llm]
+    if local:
+        ws.cell(
+            row,
+            1,
+            "Local LLM group: verdicts served from the operator's own hardware "
+            "(Inspector provider "
+            + ", ".join(sorted({spec.provider or "local" for spec in local}))
+            + "); scored with the same metrics as the cloud VLM group.",
+        )
+        row += 1
+    return row + 1
+
+
 # -------------------------------------------------------------------------- sheets
 
 
@@ -274,7 +333,19 @@ def _readme(wb: Workbook, result: ProfileResult, *, show_map_codes: bool) -> Non
         ws.cell(row, 1).font = Font(bold=True)
     row = 9
     _set_section(ws.cell(row, 1), "Datasets")
-    headers = ("Id", "Title", "Role", "Scheme", "Grid", "Path", "SHA256", "Worksheet", "Model")
+    headers = (
+        "Id",
+        "Title",
+        "Comparison group",
+        "Role key",
+        "Scheme",
+        "Grid",
+        "Path",
+        "SHA256",
+        "Worksheet",
+        "Model",
+        "Provider",
+    )
     for col, header in enumerate(headers, 1):
         ws.cell(row + 1, col, header)
     _style_header_row(ws, row + 1, 1, len(headers))
@@ -284,6 +355,7 @@ def _readme(wb: Workbook, result: ProfileResult, *, show_map_codes: bool) -> Non
             values = (
                 spec.id,
                 spec.label,
+                role_title(spec.role),
                 spec.role,
                 spec.scheme or "(unregistered)",
                 f"{spec.grid_rows}x{spec.grid_nodes}",
@@ -291,6 +363,7 @@ def _readme(wb: Workbook, result: ProfileResult, *, show_map_codes: bool) -> Non
                 source.sha256,
                 source.worksheet or "CSV",
                 spec.model_column or "",
+                _provider_text(spec),
             )
             for col, value in enumerate(values, 1):
                 ws.cell(row, col, value)
@@ -950,6 +1023,7 @@ def _summary(wb: Workbook, result: ProfileResult) -> None:
             _fmt(ws.cell(row, 9), stats.theil.u_a_given_b)
         row += 1
     row += 1
+    row = _comparison_groups(ws, row, result)
     _set_section(ws.cell(row, 1), "Label distribution per dataset")
     dist_header = row + 1
     for col, header in enumerate(("Dataset", "Label", "Count", "Share"), 1):

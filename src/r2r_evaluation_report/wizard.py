@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 from . import wizard_backend as backend
 from .core import DEFAULT_GRID, SampleCandidate, default_sample_selection
 from .profile import (
+    ROLE_TITLES,
     CellSpec,
     ComparisonSpec,
     DatasetSpec,
@@ -49,18 +50,12 @@ from .profile import (
     ProfileOptions,
     ReportProfile,
     label_orders,
+    suggest_role,
 )
 from .schemes import EXCLUDE, SchemeRegistry, load_registry
 from .workbook import derive_color_only_path
 
 STEP_TITLES = ("1 데이터셋", "2 라벨 체계", "3 비교 정의", "4 출력 옵션", "5 생성")
-ROLE_TITLES = {
-    "electrical_gt": "전기 측정 (기준)",
-    "electrical_ml": "전기 ML 예측",
-    "optical_human": "광학 육안 라벨",
-    "optical_vlm": "광학 VLM 라벨",
-    "other": "기타",
-}
 KIND_TITLES = {"reference": "자기 평가 (A가 정답)", "association": "교차 연관 (대칭)"}
 NO_SCHEME = "(미등록 — 원본 라벨 그대로)"
 NO_PRESET = "(원본 라벨 그대로)"
@@ -572,6 +567,7 @@ class WizardWindow(QMainWindow):
         self.cancel_event = Event()
         self._thread: _Worker | None = None
         self._pending: Callable[[Any], None] | None = None
+        self._result: tuple[Any] | None = None
         self._dataset_counter = 0
         self._pending_alignments: list[tuple[str, str, str]] = []
         self._last_outputs: tuple[Path, Path | None] | None = None
@@ -842,10 +838,21 @@ class WizardWindow(QMainWindow):
                     break
         row = self.dataset_table.rowCount()
         self.dataset_table.insertRow(row)
-        title_item = _item(title or Path(path).stem, editable=True)
+        if info.is_inspector and not model_column and info.inspector_models:
+            model_column = info.inspector_models[0]
+        # Inspector exports say which provider produced each column, so the
+        # comparison group (cloud VLM vs Local LLM) is pre-selected from it.
+        if role == "other":
+            role = suggest_role(info.is_inspector, model_column) or role
+        default_title = backend.default_title(path, model_column if info.is_inspector else None)
+        title_item = _item(title or default_title, editable=True)
         title_item.setData(Qt.UserRole, dataset_id)
         title_item.setData(Qt.UserRole + 1, scheme)
         title_item.setData(Qt.UserRole + 2, dict(samples or {}))
+        # Whether the source is an Inspector export is kept on the item: the
+        # model combo's isEnabled() is False whenever the page is disabled during
+        # a background job, which used to drop the model column mid-preflight.
+        title_item.setData(Qt.UserRole + 3, bool(info.is_inspector))
         self.dataset_table.setItem(row, 0, title_item)
         role_box = _combo(ROLE_TITLES.values(), ROLE_TITLES.get(role, ROLE_TITLES["other"]))
         self.dataset_table.setCellWidget(row, 1, role_box)
@@ -855,6 +862,12 @@ class WizardWindow(QMainWindow):
         model_box = _combo(info.inspector_models or ["—"], model_column)
         model_box.setEnabled(info.is_inspector)
         self.dataset_table.setCellWidget(row, 3, model_box)
+        if info.is_inspector:
+            model_box.currentTextChanged.connect(
+                lambda text, item=title_item, box=role_box, source=path: self._model_changed(
+                    item, box, source, text
+                )
+            )
         for col, value in ((4, grid[0]), (5, grid[1])):
             spin = QSpinBox()
             spin.setRange(1, 999)
@@ -868,6 +881,23 @@ class WizardWindow(QMainWindow):
         self._invalidate_from(0)
         return dataset_id
 
+    def _model_changed(self, title_item, role_box, path: str, model_column: str) -> None:
+        """Follow a model-column change: re-suggest the comparison group and default title."""
+        suggested = suggest_role(True, model_column)
+        if suggested:
+            role_box.setCurrentText(ROLE_TITLES[suggested])
+        current = title_item.text().strip()
+        defaults = {backend.default_title(path, m) for m in ("", *self._models_of(path))}
+        if not current or current in defaults:
+            title_item.setText(backend.default_title(path, model_column))
+
+    def _models_of(self, path: str) -> tuple[str, ...]:
+        for row in range(self.dataset_table.rowCount()):
+            if self.dataset_table.item(row, 6).text() == path:
+                box = self.dataset_table.cellWidget(row, 3)
+                return tuple(box.itemText(i) for i in range(box.count()))
+        return ()
+
     def dataset_specs(self) -> list[DatasetSpec]:
         specs: list[DatasetSpec] = []
         for row in range(self.dataset_table.rowCount()):
@@ -880,7 +910,7 @@ class WizardWindow(QMainWindow):
                 "other",
             )
             sheet = sheet_box.currentText()
-            model = model_box.currentText() if model_box.isEnabled() else None
+            model = model_box.currentText() if title_item.data(Qt.UserRole + 3) else None
             specs.append(
                 DatasetSpec(
                     title_item.data(Qt.UserRole),
@@ -1344,8 +1374,10 @@ class WizardWindow(QMainWindow):
             except Exception as error:
                 self._failed(str(error))
             else:
+                before = self.status_label.text()
                 done(result)
-                self.status_label.setText("완료했습니다.")
+                if self.status_label.text() == before:
+                    self.status_label.setText("완료했습니다.")
             finally:
                 self._set_busy(False)
             return
@@ -1365,12 +1397,15 @@ class WizardWindow(QMainWindow):
 
     @Slot(object)
     def _succeeded(self, result: object) -> None:
-        if self._pending is not None:
-            self._pending(result)
-        self.status_label.setText("완료했습니다.")
+        # Delivered from _cleanup, once the worker thread is released: the
+        # continuation may start the next job (preflight = inspect, then load),
+        # and _run refuses to start while self._thread is still set.
+        self._result = (result,)
 
     @Slot(str)
     def _failed(self, message: str) -> None:
+        self._pending = None
+        self._result = None
         self.status_label.setText(message)
         if message != "작업을 취소했습니다.":
             self._error(message)
@@ -1379,8 +1414,15 @@ class WizardWindow(QMainWindow):
         if self._thread is not None:
             self._thread.deleteLater()
         self._thread = None
+        pending, result = self._pending, self._result
         self._pending = None
+        self._result = None
         self._set_busy(False)
+        if pending is not None and result is not None:
+            before = self.status_label.text()
+            pending(result[0])
+            if self.status_label.text() == before:
+                self.status_label.setText("완료했습니다.")
 
     def _set_busy(self, busy: bool) -> None:
         for widget in (

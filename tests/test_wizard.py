@@ -259,3 +259,152 @@ def test_wizard_asks_for_sample_blocks_and_persists_choice(qtbot, tmp_path) -> N
     assert titles == ["x_sam5 (first)", "x_sam1", "x_sam7", "x_sam19"]  # first sam5 block kept
     saved = window.build_profile()
     assert saved.datasets[0].samples == dialog.selection
+
+
+def _inspector_matrix(path: Path, name: str) -> Path:
+    """Inspector matrix export with one cloud and one LM Studio (local) model column."""
+    rows = []
+    for index, (row, node) in enumerate(GRID):
+        verdict = ("GOOD", "BAD", "OPEN")[index % 3]
+        rows.append(
+            {
+                "image_path": f"C:/slices/{name}_rgb_{row}_{node}.png",
+                "image_sha256": "abc",
+                "agreement": "full",
+                "gemini:gemini-2.5-pro": verdict,
+                "gemini:gemini-2.5-pro actual_model_id": "gemini-2.5-pro",
+                "gemini:gemini-2.5-pro reason": "",
+                "lmstudio:qwen2.5-vl-7b-instruct": verdict if index % 7 else "GOOD",
+                "lmstudio:qwen2.5-vl-7b-instruct actual_model_id": "qwen2.5-vl-7b-instruct@q6_k",
+                "lmstudio:qwen2.5-vl-7b-instruct reason": "",
+            }
+        )
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def test_local_llm_is_a_distinct_comparison_group(qtbot, files, tmp_path: Path) -> None:
+    """An LM Studio column is pre-sorted into the Local LLM group and reported as such."""
+    export = _inspector_matrix(tmp_path / "inspector.csv", "20260731_7kgf_sam1")
+    assert profile.suggest_role(True, "lmstudio:qwen2.5-vl-7b-instruct") == "optical_vlm_local"
+    assert profile.suggest_role(True, "gemini:gemini-2.5-pro") == "optical_vlm"
+    assert profile.suggest_role(False, None) is None
+    assert profile.is_local_llm_model("LMStudio:x") and not profile.is_local_llm_model("verdict")
+
+    registry = schemes.load_registry(user_path="/nonexistent")
+    window = WizardWindow(test_mode=True, registry=registry)
+    qtbot.addWidget(window)
+    elec = window.add_dataset(str(files["elec"]), role="electrical_gt", title="Electrical")
+    cloud = window.add_dataset(str(export))  # first model column, no role given
+    local = window.add_dataset(str(export), model_column="lmstudio:qwen2.5-vl-7b-instruct")
+    specs = {spec.id: spec for spec in window.dataset_specs()}
+    assert specs[cloud].role == "optical_vlm"
+    assert specs[cloud].title == "inspector [gemini:gemini-2.5-pro]"
+    assert specs[local].role == "optical_vlm_local"
+    assert specs[local].title == "inspector [lmstudio:qwen2.5-vl-7b-instruct]"
+    assert specs[local].provider == "lmstudio" and specs[local].is_local_llm
+    assert not specs[cloud].is_local_llm
+    assert specs[local].group_label.startswith("광학 Local LLM 라벨")
+
+    # Switching the model column of a row re-suggests the group and the default title;
+    # an operator-edited title is left alone.
+    row = [spec.id for spec in window.dataset_specs()].index(cloud)
+    model_box = window.dataset_table.cellWidget(row, 3)
+    model_box.setCurrentText("lmstudio:qwen2.5-vl-7b-instruct")
+    changed = {spec.id: spec for spec in window.dataset_specs()}[cloud]
+    assert changed.role == "optical_vlm_local"
+    assert changed.title == "inspector [lmstudio:qwen2.5-vl-7b-instruct]"
+    window.dataset_table.item(row, 0).setText("My cloud run")
+    model_box.setCurrentText("gemini:gemini-2.5-pro")
+    changed = {spec.id: spec for spec in window.dataset_specs()}[cloud]
+    assert changed.role == "optical_vlm" and changed.title == "My cloud run"
+
+    window.run_preflight()
+    assert window.load is not None
+    window._confirm_all()
+    assert len(window.confirmed_alignments()) == 2
+    window._next()
+    assert {spec.id: spec.scheme for spec in window.dataset_specs()}[local] == "optical_3"
+    window._next()
+    window.add_comparison(
+        profile.ComparisonSpec("agree", "association", cloud, local, "Cloud vs Local LLM")
+    )
+    window.add_comparison(
+        profile.ComparisonSpec(
+            "elec",
+            "association",
+            elec,
+            local,
+            "Electrical vs Local LLM",
+            cells=(profile.CellSpec("E-Short x BAD", ("E-Short",), ("BAD",)),),
+        )
+    )
+    window._next()
+    output = tmp_path / "local.xlsx"
+    window.output_edit.setText(str(output))
+    window._refresh_next()
+    window._next()
+    window.run_generate()
+    assert window._last_outputs is not None, window.status_label.text()
+
+    wb = load_workbook(output)
+    verify_profile_workbook(wb)
+    readme = [[c.value for c in r] for r in wb["README"].iter_rows()]
+    header = next(r for r in readme if r[0] == "Id" and "Comparison group" in r)
+    group_col, provider_col = header.index("Comparison group"), header.index("Provider")
+    local_rows = [r for r in readme if r[0] == local]
+    assert local_rows and local_rows[0][group_col].startswith("광학 Local LLM 라벨")
+    assert local_rows[0][provider_col] == "lmstudio (local)"
+    cloud_rows = [r for r in readme if r[0] == cloud]
+    assert cloud_rows[0][provider_col] == "gemini (cloud)"
+    summary = [[c.value for c in r] for r in wb["Overall Summary"].iter_rows()]
+    assert any(r[0] == "Comparison groups (dataset roles)" for r in summary)
+    groups = [r for r in summary if r and r[2] in ("lmstudio (local)", "gemini (cloud)")]
+    assert {r[2] for r in groups} == {"lmstudio (local)", "gemini (cloud)"}
+    assert any(isinstance(r[0], str) and r[0].startswith("Local LLM group:") for r in summary)
+    saved = profile.ReportProfile.load(output.with_suffix(".profile.json"))
+    assert saved.dataset(local).role == "optical_vlm_local"
+
+
+def test_threaded_preflight_chains_inspection_and_load(qtbot, files, tmp_path: Path) -> None:
+    """Real (non test_mode) preflight: the load job must start after the inspect job.
+
+    Regression: the inspect job's continuation started the load job while the
+    finished worker thread was still referenced, so _run refused it and the
+    wizard sat at '이전 작업이 끝나기를 기다리세요.' with no datasets loaded; and the
+    model column of Inspector datasets was dropped because the (disabled-while-busy)
+    combo reported isEnabled() == False.
+    """
+    export = _inspector_matrix(tmp_path / "inspector.csv", "20260731_7kgf_sam1")
+    registry = schemes.load_registry(user_path="/nonexistent")
+    window = WizardWindow(test_mode=False, registry=registry)
+    qtbot.addWidget(window)
+    window.add_dataset(str(files["elec"]), role="electrical_gt", title="Electrical")
+    local = window.add_dataset(str(export), model_column="lmstudio:qwen2.5-vl-7b-instruct")
+    window.run_preflight()
+    qtbot.waitUntil(lambda: window.load is not None, timeout=120_000)
+    qtbot.waitUntil(lambda: window._thread is None, timeout=10_000)
+    assert "2개 데이터셋" in window.status_label.text()
+    assert window.load.suggested_schemes[local] == "optical_3"
+    assert window.dataset_specs()[1].model_column == "lmstudio:qwen2.5-vl-7b-instruct"
+    assert window.preflight_button.isEnabled()
+
+    # ...and the threaded generate path delivers its result the same way.
+    window._confirm_all()
+    window._next()
+    window._next()
+    window.add_comparison(
+        profile.ComparisonSpec("x", "association", window.dataset_specs()[0].id, local, "E x L")
+    )
+    window._next()
+    output = tmp_path / "threaded.xlsx"
+    window.output_edit.setText(str(output))
+    window._refresh_next()
+    window._next()
+    window.run_generate()
+    qtbot.waitUntil(lambda: window._last_outputs is not None, timeout=180_000)
+    qtbot.waitUntil(lambda: window._thread is None, timeout=10_000)
+    assert output.exists() and output.with_suffix(".profile.json").exists()

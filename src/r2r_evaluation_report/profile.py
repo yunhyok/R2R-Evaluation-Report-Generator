@@ -55,6 +55,58 @@ class ProfileError(ValueError):
     """Raised for an inconsistent profile (unknown ids, missing mappings, ...)."""
 
 
+# --------------------------------------------------------------------------- roles
+
+ROLE_TITLES: dict[str, str] = {
+    "electrical_gt": "전기 측정 (기준)",
+    "electrical_ml": "전기 ML 예측",
+    "optical_human": "광학 육안 라벨",
+    "optical_vlm": "광학 VLM 라벨 (cloud API)",
+    "optical_vlm_local": "광학 Local LLM 라벨 (LM Studio 등 로컬 서버)",
+    "other": "기타",
+}
+"""Comparison-group vocabulary of ``DatasetSpec.role`` (key -> Korean title).
+
+``role`` never changes how a dataset is parsed or scored; it records which
+comparison group a dataset belongs to so the report can say what was compared
+with what.  ``optical_vlm_local`` is the Local LLM comparison group: verdicts a
+Printed-Device-AI-Inspector run obtained from a model served on the operator's
+own hardware (the Inspector's ``lmstudio`` provider), kept apart from cloud-API
+VLMs because the two differ in reproducibility, cost and data residency even
+when the prompt and label set are identical.
+"""
+
+LOCAL_LLM_PROVIDERS: frozenset[str] = frozenset({"lmstudio", "ollama", "llamacpp", "vllm", "local"})
+"""Inspector provider ids that denote a locally served model (``provider:model_id``)."""
+
+
+def model_provider(model_column: str | None) -> str | None:
+    """``provider`` part of an Inspector ``provider:model_id`` column, else None."""
+    if not model_column or ":" not in model_column:
+        return None
+    provider = model_column.split(":", 1)[0].strip().casefold()
+    return provider or None
+
+
+def is_local_llm_model(model_column: str | None) -> bool:
+    return model_provider(model_column) in LOCAL_LLM_PROVIDERS
+
+
+def suggest_role(is_inspector: bool, model_column: str | None) -> str | None:
+    """Role to pre-select for a dataset, or None when nothing can be inferred.
+
+    Only Inspector exports carry a provider, so only they get a suggestion:
+    a local provider is the Local LLM comparison group, anything else a cloud VLM.
+    """
+    if not is_inspector:
+        return None
+    return "optical_vlm_local" if is_local_llm_model(model_column) else "optical_vlm"
+
+
+def role_title(role: str) -> str:
+    return ROLE_TITLES.get(role, role)
+
+
 # --------------------------------------------------------------------------- specs
 
 
@@ -79,6 +131,23 @@ class DatasetSpec:
     @property
     def label(self) -> str:
         return self.title or self.id
+
+    @property
+    def provider(self) -> str | None:
+        """Inspector provider id (``lmstudio``, ``gemini``, ...) when this is a model column."""
+        return model_provider(self.model_column)
+
+    @property
+    def is_local_llm(self) -> bool:
+        return self.role == "optical_vlm_local" or is_local_llm_model(self.model_column)
+
+    @property
+    def group_label(self) -> str:
+        """Comparison-group description for reports: role title plus provider:model."""
+        text = role_title(self.role)
+        if self.model_column:
+            text += f" · {self.model_column}"
+        return text
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
