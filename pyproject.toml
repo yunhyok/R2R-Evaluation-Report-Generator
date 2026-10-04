@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "r2r-evaluation-report-generator"
-version = "0.5.1"
+version = "0.6.0"
 description = "Auditable R2R printed-device evaluation workbooks: spatial maps, reference and association comparisons."
 readme = "README.md"
 requires-python = ">=3.11"

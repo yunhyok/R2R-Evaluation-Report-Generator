@@ -1,3 +1,19 @@
+# v0.6.0
+
+- New comparison group `optical_vlm_local` ("Local LLM"): Inspector model columns from a local
+  provider (`lmstudio`, `ollama`, `llamacpp`, `vllm`, `local`) are pre-sorted into it, other
+  providers into `optical_vlm` (cloud). One export can be added once per model; default titles
+  carry `[provider:model_id]`; changing the model column re-suggests the group and default title.
+- README sheet gains *Comparison group*, *Role key* and *Provider* (`lmstudio (local)`,
+  `gemini (cloud)`) columns; Overall Summary gains a *Comparison groups (dataset roles)* block.
+  Metrics are unchanged; see METHODOLOGY "Comparison groups and the Local LLM group".
+- Fixed (v0.5.1 regression): the GUI preflight never started its second stage (load after
+  sample-block inspection) in real threaded mode and stopped at "이전 작업이 끝나기를 기다리세요.";
+  job results are now delivered after the worker thread is released. A threaded-mode regression
+  test covers preflight and generate.
+- Fixed: the Inspector model column was dropped while the page was disabled during a job
+  ("choose the Inspector model column").
+
 # v0.5.1
 
 - Repeated sample Names and incomplete arrays no longer reject a merged converter CSV: the parser

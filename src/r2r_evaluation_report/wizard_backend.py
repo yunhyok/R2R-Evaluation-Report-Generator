@@ -105,6 +105,16 @@ def inspect_source(path: str | Path) -> SourceInfo:
     return SourceInfo(str(source), tuple(info.title for info in infos), tuple(models))
 
 
+def default_title(path: str | Path, model_column: str | None = None) -> str:
+    """Dataset title shown before the operator edits it.
+
+    Inspector exports hold one column per model, and one report may compare
+    several of them from the same file, so the model is part of the title.
+    """
+    stem = Path(path).stem
+    return f"{stem} [{model_column}]" if model_column else stem
+
+
 def inspect_dataset_samples(spec: DatasetSpec) -> tuple[SampleCandidate, ...]:
     """Every sample block of one dataset (repeat Names and incomplete arrays included)."""
     return inspect_samples(
