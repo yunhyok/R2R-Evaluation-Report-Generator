@@ -1,3 +1,21 @@
+# v0.8.0
+
+- Partial sample blocks are opt-in: the block-selection dialog gains "불완전한 블록도 포함 허용".
+  When on, a block with fewer coordinates than the grid can be included as a partial sample
+  (status `부분 (480/988)`, bulk button "불완전 블록까지 모두 포함"); the consent is stored in the
+  profile as `datasets[].allow_partial` and honoured by `--profile`. Off (the default) keeps the
+  complete-array contract; a file whose blocks are all incomplete used to stop at "포함할 샘플이
+  없습니다".
+- Comparisons score only coordinates present on both sides; coordinates present on one side only
+  are reported as *Unpaired coordinates* (overall and per sample) and never substituted. Maps
+  cover the whole grid, painting absent coordinates `(no data)` (white) with the title
+  `(present/size coordinates)`; agreement and co-occurrence maps show them as `Missing`.
+- Coverage is recorded everywhere a reader looks: README *Partial blocks* column and a new
+  *Warnings (non-blocking)* section (one line per partial sample), Alignment *coverage* columns,
+  Overall Summary *Coverage* column in the comparison-groups block.
+- Grids still have to match the primary dataset; a 20 × 24 array is a partial block inside the
+  26 × 38 grid.
+
 # v0.7.0
 
 - Good / Bad / Open prediction sets from R2R-Machine-Learning 0.6.0 (`visual_3class`) now load:

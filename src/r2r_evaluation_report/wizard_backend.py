@@ -170,8 +170,15 @@ def selection_summary(candidates: Sequence[SampleCandidate]) -> dict[str, list[S
 
 
 def validate_selection(
-    candidates: Sequence[SampleCandidate], selection: Mapping[str, str]
+    candidates: Sequence[SampleCandidate],
+    selection: Mapping[str, str],
+    allow_partial: bool = False,
 ) -> list[str]:
+    """Human-readable problems with a block selection (empty when it can be applied).
+
+    An incomplete block is a problem unless ``allow_partial`` is on, in which case
+    it becomes a partial sample whose missing coordinates are never scored.
+    """
     problems: list[str] = []
     by_key = {item.key: item for item in candidates}
     titles: dict[str, str] = {}
@@ -180,10 +187,10 @@ def validate_selection(
         if item is None:
             problems.append(f"알 수 없는 블록: {key}")
             continue
-        if not item.complete:
+        if not item.complete and not allow_partial:
             problems.append(
                 f"{item.default_title}: 좌표 {item.unique_coordinates}/{item.grid_size}개 — "
-                "불완전한 블록은 포함할 수 없습니다."
+                "불완전한 블록은 '불완전한 블록도 포함 허용'을 켜야 포함할 수 있습니다."
             )
         normalised = "".join(ch for ch in title.casefold() if ch.isalnum())
         if not normalised:

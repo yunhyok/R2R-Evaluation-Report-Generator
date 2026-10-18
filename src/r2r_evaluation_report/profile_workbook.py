@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from colorsys import hsv_to_rgb
 from typing import Any
 
@@ -34,6 +34,7 @@ from .profile import (
     ReferenceStats,
     SampleData,
     _map_value,
+    coverage,
     role_title,
 )
 from .schemes import MISSING
@@ -74,6 +75,9 @@ KNOWN_STYLES: dict[str, tuple[str, str]] = {
     "exclude": ("X", "BFBFBF"),
     "missing": ("-", "F2F2F2"),
 }
+NO_DATA_LABEL = "(no data)"
+NO_DATA_STYLE = ("·", "FFFFFF")
+"""Map cell of a coordinate the dataset does not cover (partial sample block)."""
 OUTCOME_STYLES = {
     "Match": ("=", "92D050"),
     "Mismatch": ("≠", "FF0000"),
@@ -165,19 +169,28 @@ def _paint(
 
 
 def _counts_panel(
-    ws: Any, row: int, col: int, title: str, styles: Mapping[str, tuple[str, str]], counts: Counter
+    ws: Any,
+    row: int,
+    col: int,
+    title: str,
+    styles: Mapping[str, tuple[str, str]],
+    counts: Counter,
+    *,
+    outside_total: Collection[str] = (),
 ) -> None:
+    """Legend with counts and shares; labels in ``outside_total`` (no data) get no share."""
     _write_legend(ws, row, col, title, styles)
     ws.cell(row, col + 2, "Count").font = Font(bold=True)
     ws.cell(row, col + 3, "Share").font = Font(bold=True)
-    total = sum(counts.values())
+    total = sum(count for label, count in counts.items() if label not in outside_total)
     for offset, label in enumerate(styles, 1):
         ws.cell(row + offset, col + 2, counts.get(label, 0))
-        share = ws.cell(row + offset, col + 3, counts.get(label, 0) / total if total else None)
-        if share.value is not None:
-            share.number_format = "0.0%"
-        else:
+        share = ws.cell(row + offset, col + 3)
+        if label in outside_total or not total:
             share.value = "N/A"
+        else:
+            share.value = counts.get(label, 0) / total
+            share.number_format = "0.0%"
 
 
 # ------------------------------------------------------------------------- helpers
@@ -275,6 +288,15 @@ def _observed_spellings(result: ProfileResult, dataset_id: str) -> dict[str, tup
     return {key: tuple(spellings) for key, spellings in seen.items()}
 
 
+def _coverage_text(per_sheet: Mapping[str, tuple[int, int]]) -> str:
+    """'complete' or 'partial: k of n samples, min p/size' for one dataset."""
+    partial = [(present, size) for present, size in per_sheet.values() if present < size]
+    if not partial:
+        return "complete"
+    present, size = min(partial)
+    return f"partial: {len(partial)} of {len(per_sheet)} samples, min {present}/{size}"
+
+
 def _provider_text(spec: DatasetSpec) -> str:
     """``lmstudio (local)`` / ``gemini (cloud)`` / '' for non-Inspector datasets."""
     provider = spec.provider
@@ -286,12 +308,13 @@ def _provider_text(spec: DatasetSpec) -> str:
 def _comparison_groups(ws, row: int, result: ProfileResult) -> int:
     """'Comparison groups' block: which datasets stand in which group, with provider/model."""
     _set_section(ws.cell(row, 1), "Comparison groups (dataset roles)")
-    headers = ("Group", "Dataset", "Provider", "Model", "Scheme", "Samples", "Labels")
+    headers = ("Group", "Dataset", "Provider", "Model", "Scheme", "Samples", "Labels", "Coverage")
     for col, header in enumerate(headers, 1):
         ws.cell(row + 1, col, header)
     _style_header_row(ws, row + 1, 1, len(headers))
     row += 2
     order = list(ROLE_TITLES)
+    covered = coverage(result.datasets)
     specs = sorted(
         result.profile.datasets,
         key=lambda spec: (order.index(spec.role) if spec.role in order else len(order)),
@@ -312,6 +335,7 @@ def _comparison_groups(ws, row: int, result: ProfileResult) -> int:
             spec.scheme or "(unregistered)",
             len(dataset.sheets),
             labelled,
+            _coverage_text(covered.get(spec.id, {})),
         )
         for col, value in enumerate(values, 1):
             ws.cell(row, col, value)
@@ -375,6 +399,7 @@ def _readme(wb: Workbook, result: ProfileResult, *, show_map_codes: bool) -> Non
         "Worksheet",
         "Model",
         "Provider",
+        "Partial blocks",
     )
     for col, header in enumerate(headers, 1):
         ws.cell(row + 1, col, header)
@@ -394,6 +419,7 @@ def _readme(wb: Workbook, result: ProfileResult, *, show_map_codes: bool) -> Non
                 source.worksheet or "CSV",
                 spec.model_column or "",
                 _provider_text(spec),
+                "allowed" if spec.allow_partial else "",
             )
             for col, value in enumerate(values, 1):
                 ws.cell(row, col, value)
@@ -429,6 +455,15 @@ def _readme(wb: Workbook, result: ProfileResult, *, show_map_codes: bool) -> Non
         row += 1
         ws.cell(row, 1, "none")
     row += 2
+    _set_section(ws.cell(row, 1), "Warnings (non-blocking)")
+    if result.warnings:
+        for warning in result.warnings:
+            row += 1
+            ws.cell(row, 1, warning).alignment = Alignment(wrap_text=True)
+    else:
+        row += 1
+        ws.cell(row, 1, "none")
+    row += 2
     _set_section(ws.cell(row, 1), "Semantics")
     notes = (
         "reference comparison: side A is ground truth for side B; confusion matrix rows are "
@@ -439,6 +474,10 @@ def _readme(wb: Workbook, result: ProfileResult, *, show_map_codes: bool) -> Non
         "N/A: undefined denominator; never substituted by zero.",
         "Cochran warning: >20 % of expected counts < 5 or any < 1 — read chi-square with care; "
         "2x2 cells always carry Fisher's exact p.",
+        "Partial block: a sample block admitted with fewer coordinates than the grid "
+        "(profile 'allow_partial'). Its missing coordinates are 'no data' on its map, "
+        "'Missing' on agreement maps, and counted as 'Unpaired coordinates' in every "
+        "comparison; they are never scored and never substituted.",
     )
     for note in notes:
         row += 1
@@ -512,16 +551,34 @@ def _alignment(wb: Workbook, result: ProfileResult) -> None:
     ws = wb.create_sheet("Alignment")
     _title(ws, "Sample alignment — which sheet of each dataset forms one sample", "H")
     ids = [spec.id for spec in result.profile.datasets]
-    headers = ("Sample", *[_dataset_title(result, dataset_id) for dataset_id in ids])
+    headers = (
+        "Sample",
+        *[_dataset_title(result, dataset_id) for dataset_id in ids],
+        *[f"{_dataset_title(result, dataset_id)} coverage" for dataset_id in ids],
+    )
     for col, header in enumerate(headers, 1):
         ws.cell(3, col, header)
     _style_header_row(ws, 3, 1, len(headers))
+    covered = coverage(result.datasets)
     for row, sample in enumerate(result.samples, 4):
         ws.cell(row, 1, sample.sample)
         for col, dataset_id in enumerate(ids, 2):
-            ws.cell(row, col, sample.members.get(dataset_id, "(not aligned)"))
+            member = sample.members.get(dataset_id)
+            ws.cell(row, col, member if member is not None else "(not aligned)")
+            present, size = covered.get(dataset_id, {}).get(member, (None, None))
+            ws.cell(
+                row,
+                col + len(ids),
+                "" if present is None else f"{present}/{size}",
+            )
     for col in range(1, len(headers) + 1):
-        ws.column_dimensions[get_column_letter(col)].width = 30
+        ws.column_dimensions[get_column_letter(col)].width = 30 if col <= len(ids) + 1 else 14
+    ws.cell(
+        max(len(result.samples) + 5, 5),
+        1,
+        "Coverage: coordinates present / grid size per aligned sheet; below the grid size "
+        "the sheet is a partial block admitted by the operator (profile 'allow_partial').",
+    )
     ws.freeze_panes = "B4"
 
 
@@ -588,6 +645,12 @@ def _sample_sheet(
     block = grid.rows + MAP_GAP
     breaks: list[int] = []
     coords = {(record.row, record.node): record for record in sample.records}
+    # Every map covers the whole grid: a coordinate a dataset does not carry (partial
+    # block) is painted 'no data' / 'Missing' so the sheet verifier's solid-fill
+    # contract holds and the gap is visible.
+    grid_keys = [
+        (row, node) for row in range(1, grid.rows + 1) for node in range(1, grid.nodes + 1)
+    ]
 
     def next_block() -> int:
         nonlocal heading
@@ -600,18 +663,35 @@ def _sample_sheet(
         if spec.id not in sample.members:
             continue
         top = next_block()
-        body = _style_map_block(ws, top, f"{spec.label} — raw labels", grid.rows, grid.nodes)
         palette = styles[spec.id]
         cells = {}
         counts: Counter = Counter()
-        for key, record in coords.items():
-            value = record.value(spec.id)
+        for key in grid_keys:
+            record = coords.get(key)
+            value = record.value(spec.id) if record is not None else None
             if value is None:
-                continue
-            cells[key] = palette[value]
-            counts[value] += 1
+                cells[key] = NO_DATA_STYLE
+                counts[NO_DATA_LABEL] += 1
+            else:
+                cells[key] = palette[value]
+                counts[value] += 1
+        present = grid.size - counts[NO_DATA_LABEL]
+        title = f"{spec.label} — raw labels"
+        legend: Mapping[str, tuple[str, str]] = palette
+        if present < grid.size:
+            title += f" ({present}/{grid.size} coordinates)"
+            legend = {**palette, NO_DATA_LABEL: NO_DATA_STYLE}
+        body = _style_map_block(ws, top, title, grid.rows, grid.nodes)
         _paint(ws, body, cells, show_codes=show_map_codes)
-        _counts_panel(ws, top, panel_col, f"{spec.label} legend", palette, counts)
+        _counts_panel(
+            ws,
+            top,
+            panel_col,
+            f"{spec.label} legend",
+            legend,
+            counts,
+            outside_total=(NO_DATA_LABEL,),
+        )
     for comparison in result.comparisons:
         spec = comparison.spec
         if spec.a not in sample.members or spec.b not in sample.members:
@@ -623,8 +703,13 @@ def _sample_sheet(
             )
             cells = {}
             counts = Counter()
-            for key, record in coords.items():
-                outcome = _outcome(comparison, record.value(spec.a), record.value(spec.b))
+            for key in grid_keys:
+                record = coords.get(key)
+                outcome = (
+                    _outcome(comparison, record.value(spec.a), record.value(spec.b))
+                    if record is not None
+                    else "Missing"
+                )
                 cells[key] = OUTCOME_STYLES[outcome]
                 counts[outcome] += 1
             _paint(ws, body, cells, show_codes=show_map_codes)
@@ -641,9 +726,14 @@ def _sample_sheet(
                 )
                 cells = {}
                 counts = Counter()
-                for key, record in coords.items():
-                    state = _cooccurrence(
-                        comparison, cell_index, record.value(spec.a), record.value(spec.b)
+                for key in grid_keys:
+                    record = coords.get(key)
+                    state = (
+                        _cooccurrence(
+                            comparison, cell_index, record.value(spec.a), record.value(spec.b)
+                        )
+                        if record is not None
+                        else "Missing"
                     )
                     cells[key] = COOCCURRENCE_STYLES[state]
                     counts[state] += 1
@@ -740,6 +830,7 @@ def _reference_block(ws: Any, row: int, title: str, stats: ReferenceStats) -> in
     general = [
         ("Pairs scored", stats.pairs),
         ("Excluded records", stats.excluded),
+        ("Unpaired coordinates", stats.unpaired),
         ("Accuracy", (metrics.accuracy, "0.0%")),
         (
             "Accuracy CI95",
@@ -851,6 +942,7 @@ def _association_block(ws: Any, row: int, title: str, stats: AssociationStats) -
     summary = [
         ("Pairs", stats.pairs),
         ("Excluded records", stats.excluded),
+        ("Unpaired coordinates", stats.unpaired),
         ("Chi-square", (chi.statistic, "0.00")),
         ("Degrees of freedom", chi.dof),
         ("Chi-square p", chi.p_value),
@@ -970,6 +1062,7 @@ def _comparison_sheet(wb: Workbook, result: ProfileResult, comparison: Compariso
                     name,
                     stats.pairs,
                     stats.excluded,
+                    stats.unpaired,
                     (stats.metrics.accuracy, "0.0%"),
                     (stats.metrics.macro_f1, "0.000"),
                     (stats.agreement.kappa, "0.000"),
@@ -983,11 +1076,21 @@ def _comparison_sheet(wb: Workbook, result: ProfileResult, comparison: Compariso
                 row,
                 1,
                 "Per sample",
-                ("Sample", "Pairs", "Excluded", "Accuracy", "Macro F1", "Kappa", "MCC", "Baseline"),
+                (
+                    "Sample",
+                    "Pairs",
+                    "Excluded",
+                    "Unpaired",
+                    "Accuracy",
+                    "Macro F1",
+                    "Kappa",
+                    "MCC",
+                    "Baseline",
+                ),
                 rows,
             )
         else:
-            headers = ["Sample", "Pairs", "Excluded", "Chi-square p", "Cramér's V (bc)"]
+            headers = ["Sample", "Pairs", "Excluded", "Unpaired", "Chi-square p", "Cramér's V (bc)"]
             headers += [f"OR: {cell.name}" for cell in spec.cells]
             rows = []
             for name, stats in comparison.per_sample.items():
@@ -995,6 +1098,7 @@ def _comparison_sheet(wb: Workbook, result: ProfileResult, comparison: Compariso
                     name,
                     stats.pairs,
                     stats.excluded,
+                    stats.unpaired,
                     stats.chi.p_value,
                     (stats.chi.cramers_v_corrected, "0.000"),
                 ]
@@ -1003,8 +1107,8 @@ def _comparison_sheet(wb: Workbook, result: ProfileResult, comparison: Compariso
             start = row
             row = _write_table(ws, row, 1, "Per sample", headers, rows)
             for r in range(start + 2, row):
-                value = ws.cell(r, 4).value
-                _pvalue(ws.cell(r, 4), None if value == "N/A" else value)
+                value = ws.cell(r, 5).value  # 'Chi-square p' column
+                _pvalue(ws.cell(r, 5), None if value == "N/A" else value)
         row += 1
         for name, stats in comparison.per_sample.items():
             ws.row_breaks.append(Break(id=row - 1))

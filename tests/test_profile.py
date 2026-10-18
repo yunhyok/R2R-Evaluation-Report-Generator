@@ -911,3 +911,135 @@ def test_visual_label_ml_predictions_join_the_optical_vocabulary(tmp_path: Path)
     distribution = [row for row in summary if row and row[0] == "Visual ML"]
     assert [row[1] for row in distribution] == list(OPTICAL)
     assert sum(row[2] for row in distribution) == 988
+
+
+# ------------------------------------------------------------- partial blocks (v0.8.0)
+
+
+def _partial_csv(
+    path: Path, name: str, column: str, values, rows: int = 20, nodes: int = 24
+) -> Path:
+    """One block covering only a ``rows x nodes`` corner of the 26 x 38 grid."""
+    corner = [(row, node) for row in range(1, rows + 1) for node in range(1, nodes + 1)]
+    return _csv(
+        path,
+        [
+            {"Name": name, "Row": row, "Node": node, column: values(index)}
+            for index, (row, node) in enumerate(corner)
+        ],
+    )
+
+
+def test_partial_blocks_are_opt_in_and_reported(tmp_path: Path) -> None:
+    """A 20 x 24 block inside the 26 x 38 grid is admitted only with allow_partial, scored on
+    the covered coordinates, and its reduced coverage is visible everywhere in the workbook."""
+    registry = schemes.load_registry(user_path="/none")
+    full = _grid_csv(tmp_path / "elec.csv", "s1", "Status", lambda i, _r, _n: E5[i % 5])
+    part = _partial_csv(tmp_path / "optical.csv", "s1", "label", lambda i: OPTICAL[i % 3])
+    candidates = core.inspect_samples(part, "label")
+    assert len(candidates) == 1 and not candidates[0].complete
+    assert candidates[0].unique_coordinates == 480 and core.selection_needed(candidates)
+    assert core.default_sample_selection(candidates) == {}
+    selection = core.default_sample_selection(candidates, include_partial=True)
+    assert selection == {"CSV::s1::0": "s1"}
+    with pytest.raises(core.DataContractError, match="exactly 988"):
+        core.parse_dataset(part, "label", samples=selection)
+    with pytest.raises(core.DataContractError, match="exactly 988"):
+        core.parse_dataset(part, "label")  # strict contract untouched
+    dataset = core.parse_dataset(part, "label", samples=selection, allow_partial=True)
+    assert dataset.sheets[0].unique_coordinates == 480 and len(dataset.sheets[0].records) == 480
+
+    spec = profile.DatasetSpec(
+        "o", str(part), "optical_human", "optical_3", samples=selection, allow_partial=True
+    )
+    reloaded = profile.DatasetSpec.from_dict(spec.to_dict())
+    assert reloaded.allow_partial and reloaded.to_dict()["allow_partial"] is True
+    assert "allow_partial" not in profile.DatasetSpec("x", "x.csv").to_dict()
+
+    e5 = registry.scheme("electrical_e5").labels
+    report = profile.ReportProfile(
+        (
+            profile.DatasetSpec(
+                "e", str(full), "electrical_gt", "electrical_e5", title="Electrical"
+            ),
+            spec,
+        ),
+        (
+            profile.ComparisonSpec(
+                "ref",
+                "reference",
+                "e",
+                "o",
+                "E vs optical (binary)",
+                mapping_a=registry.preset("e5_to_binary").resolved_rules(e5),
+                mapping_b=registry.preset("optical_to_binary").resolved_rules(OPTICAL),
+                categories=("Pass", "Fail"),
+                positive="Fail",
+                strict_macro=False,
+            ),
+            profile.ComparisonSpec(
+                "assoc",
+                "association",
+                "e",
+                "o",
+                cells=(profile.CellSpec("E-Short x BAD", ("E-Short",), ("BAD",)),),
+            ),
+        ),
+    )
+    datasets = profile.load_datasets(report)
+    assert profile.coverage(datasets) == {"e": {"s1": (988, 988)}, "o": {"s1": (480, 988)}}
+    result = profile.evaluate_profile(report, datasets, registry=registry)
+    assert not result.blocked, result.errors
+    assert result.warnings == (
+        "dataset 'o' sample 's1': 480/988 coordinates (partial block; comparisons score only "
+        "coordinates present on both sides)",
+    )
+    assert len(result.samples[0].records) == 988  # union of both sides' coordinates
+    reference, association = result.comparisons
+    covered = [(row, node) for row in range(1, 21) for node in range(1, 25)]
+    index = {key: position for position, key in enumerate(GRID)}
+    excluded = sum(1 for key in covered if E5[index[key] % 5] == "E-Invalid")
+    assert reference.overall.pairs == 480 - excluded and reference.overall.excluded == excluded
+    assert reference.overall.unpaired == 988 - 480
+    assert reference.per_sample["s1"].unpaired == 508
+    assert association.overall.pairs == 480 and association.overall.unpaired == 508
+
+    from openpyxl import load_workbook
+
+    from r2r_evaluation_report.profile_workbook import verify_profile_workbook
+    from r2r_evaluation_report.workbook import generate_workbook
+
+    output = tmp_path / "partial.xlsx"
+    generate_workbook(output, result)
+    wb = load_workbook(output)
+    verify_profile_workbook(wb)  # every map cell is filled although the block is partial
+    readme = [[c.value for c in r] for r in wb["README"].iter_rows()]
+    header = next(r for r in readme if r[0] == "Id" and "Partial blocks" in r)
+    assert next(r for r in readme if r[0] == "o")[header.index("Partial blocks")] == "allowed"
+    assert not next(r for r in readme if r[0] == "e")[header.index("Partial blocks")]
+    assert any(
+        isinstance(r[0], str) and r[0].startswith("dataset 'o' sample 's1': 480/988")
+        for r in readme
+    )
+    alignment = [[c.value for c in r] for r in wb["Alignment"].iter_rows(min_row=3, max_row=4)]
+    columns = {name: position for position, name in enumerate(alignment[0]) if name}
+    assert alignment[1][columns["Electrical coverage"]] == "988/988"
+    assert alignment[1][columns["o coverage"]] == "480/988"
+    assert alignment[1][columns["o"]] == "s1"
+    sheet = wb["S01"]
+    titles = [
+        cell.value
+        for row in sheet.iter_rows(min_col=3, max_col=3)
+        for cell in row
+        if isinstance(cell.value, str) and "raw labels" in cell.value
+    ]
+    assert titles == ["Electrical — raw labels", "o — raw labels (480/988 coordinates)"]
+    assert any(cell.value == "(no data)" for row in sheet.iter_rows() for cell in row)
+    comparison = [[c.value for c in r] for r in wb["C01"].iter_rows()]
+    values = {r[0]: r[1] for r in comparison if r and isinstance(r[0], str)}
+    assert values["Unpaired coordinates"] == 508 and values["Pairs scored"] == 480 - excluded
+    summary = [[c.value for c in r] for r in wb["Overall Summary"].iter_rows()]
+    roles = {profile.role_title("electrical_gt"), profile.role_title("optical_human")}
+    groups = {r[1]: r for r in summary if r and r[0] in roles}
+    assert groups["Electrical"][7] == "complete"
+    assert groups["o"][7] == "partial: 1 of 1 samples, min 480/988"

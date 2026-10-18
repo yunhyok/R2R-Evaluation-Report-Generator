@@ -555,3 +555,87 @@ def test_visual_label_ml_export_is_its_own_comparison_group(qtbot, files, tmp_pa
     saved = profile.ReportProfile.load(output.with_suffix(".profile.json"))
     assert saved.dataset(visual).role == "optical_ml"
     assert saved.comparisons[0].categories == ("GOOD", "BAD", "OPEN")
+
+
+def test_partial_blocks_need_consent_in_dialog_and_flow_into_the_report(
+    qtbot, files, tmp_path: Path
+) -> None:
+    from r2r_evaluation_report.wizard import SampleSelectionDialog
+    from tests.test_profile import _partial_csv
+
+    partial = _partial_csv(
+        tmp_path / "human_partial.csv",
+        "20260731_7kgf_sam1",
+        "label",
+        lambda index: ("GOOD", "BAD", "OPEN")[index % 3],
+    )
+    registry = schemes.load_registry(user_path="/nonexistent")
+    candidates = wizard_backend.pending_sample_selections(
+        [profile.DatasetSpec("d1", str(partial), "optical_human")]
+    )["d1"]
+    assert len(candidates) == 1 and not candidates[0].complete
+    chosen = {candidates[0].key: "x"}
+    assert wizard_backend.validate_selection(candidates, chosen)
+    assert not wizard_backend.validate_selection(candidates, chosen, allow_partial=True)
+
+    dialog = SampleSelectionDialog(None, "Human", candidates)
+    qtbot.addWidget(dialog)
+    box = dialog.table.cellWidget(0, 0)
+    assert not box.isEnabled() and dialog.table.item(0, 8).text() == "불완전"
+    assert "포함할 샘플이 없습니다" in dialog.problems_label.text()
+    dialog._accept()
+    assert dialog.result() != QDialog.Accepted
+    dialog.allow_partial_box.setChecked(True)
+    assert box.isEnabled() and dialog.table.item(0, 8).text() == "부분 (480/988)"
+    dialog._bulk_including_partial()
+    assert dialog.current_selection() == {candidates[0].key: "20260731_7kgf_sam1"}
+    assert dialog.problems_label.text() == ""
+    dialog.allow_partial_box.setChecked(False)  # withdrawing consent unticks the block
+    assert not box.isChecked() and not box.isEnabled()
+    dialog.allow_partial_box.setChecked(True)
+    box.setChecked(True)
+    dialog._accept()
+    assert dialog.result() == QDialog.Accepted and dialog.allow_partial
+
+    window = WizardWindow(test_mode=True, registry=registry)
+    qtbot.addWidget(window)
+    elec = window.add_dataset(str(files["elec"]), role="electrical_gt", title="Electrical")
+    human = window.add_dataset(str(partial), role="optical_human", title="Human")
+    window.set_samples(human, dialog.selection, dialog.allow_partial)
+    assert {s.id: s.allow_partial for s in window.dataset_specs()} == {elec: False, human: True}
+    window.run_preflight()
+    assert window.load is not None, window.status_label.text()
+    assert window.load.datasets[human].sheets[0].unique_coordinates == 480
+    window._confirm_all()
+    assert len(window.confirmed_alignments()) == 1
+    window._next()
+    window._next()
+    window.add_comparison(
+        profile.ComparisonSpec(
+            "x",
+            "association",
+            elec,
+            human,
+            "E x H",
+            cells=(profile.CellSpec("E-Short x BAD", ("E-Short",), ("BAD",)),),
+        )
+    )
+    window._next()
+    output = tmp_path / "partial.xlsx"
+    window.output_edit.setText(str(output))
+    window._refresh_next()
+    window._next()
+    assert "부분 블록 허용" in window.summary_view.toPlainText()
+    window.run_generate()
+    assert window._last_outputs is not None, window.status_label.text()
+    saved = profile.ReportProfile.load(output.with_suffix(".profile.json"))
+    assert saved.dataset(human).allow_partial and saved.dataset(human).samples == dialog.selection
+    verify_profile_workbook(load_workbook(output))
+
+    # Reloading the profile keeps the consent; the saved selection needs no new dialog.
+    again = WizardWindow(test_mode=True, registry=registry)
+    qtbot.addWidget(again)
+    again.apply_profile(saved)
+    assert again.dataset_specs()[1].allow_partial
+    again.run_preflight()
+    assert again.load is not None and len(again.confirmed_alignments()) == 1
