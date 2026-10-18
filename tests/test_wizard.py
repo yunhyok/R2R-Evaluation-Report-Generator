@@ -639,3 +639,31 @@ def test_partial_blocks_need_consent_in_dialog_and_flow_into_the_report(
     assert again.dataset_specs()[1].allow_partial
     again.run_preflight()
     assert again.load is not None and len(again.confirmed_alignments()) == 1
+
+
+def test_output_page_offers_the_transfer_curve_grid_option(qtbot, files, tmp_path) -> None:
+    registry = schemes.load_registry(user_path="/nonexistent")
+    window = WizardWindow(test_mode=True, registry=registry)
+    qtbot.addWidget(window)
+    window.add_dataset(str(files["elec"]), role="electrical_gt", title="Electrical")
+    window.run_preflight()
+    assert window.sweeps_check.isChecked() and window.sweeps_check.isEnabled()
+    assert window.build_profile().options.sweep_maps is True
+    window.sweeps_check.setChecked(False)
+    assert window.build_profile().options.sweep_maps is False
+    # The grid lives on the map sheets: without them the option is inert and greyed out.
+    window.maps_check.setChecked(False)
+    assert not window.sweeps_check.isEnabled()
+    window.maps_check.setChecked(True)
+    assert window.sweeps_check.isEnabled()
+    window.output_edit.setText(str(tmp_path / "out.xlsx"))
+    assert "transfer curve 격자 제외" in window._summary_text()
+    saved = window.build_profile()
+    assert profile.ReportProfile.from_dict(saved.to_dict()).options.sweep_maps is False
+    again = WizardWindow(test_mode=True, registry=registry)
+    qtbot.addWidget(again)
+    again.apply_profile(saved)
+    assert not again.sweeps_check.isChecked()
+    again.sweeps_check.setChecked(True)
+    again.output_edit.setText(str(tmp_path / "out.xlsx"))
+    assert "transfer curve 격자 포함" in again._summary_text()

@@ -154,7 +154,27 @@ one agreement map per reference comparison (Match / Mismatch / Excluded / Missin
 co-occurrence map per selected 2 × 2 cell (Both / A only / B only / Neither). Map blocks are
 `rows + 10` worksheet rows tall starting at row 8, columns `C…`, 2.5 wide; page breaks separate the
 blocks. The color-only sibling clears only the map bodies. Verification reopens both files and
-checks sheet order, map axes for the recorded grid, fills, and comparison titles.
+checks sheet order, map axes for the recorded grid, fills, and comparison titles. Since v0.9.0 a
+dataset whose source carries the converter's current-sweep columns also gets a *measured
+transfer curves* block right below its raw-label map (see below).
+
+### Measured transfer-curve grids (v0.9.0)
+
+A label map shows the verdict of each device, not the measurement it was derived from. When a
+dataset is an R2R-TXT-Converter export — `_merged.csv` (one current column per gate voltage,
+header = the voltage, e.g. `-20.00000`), `_raw.csv` (`I_<voltage>V`) or either saved as `.xlsx` —
+the parser keeps every record's sweep as a float32 row of a per-worksheet `SweepTable`
+(`core.sweep_columns` accepts two or more such columns with a strictly monotonic voltage axis; a
+blank or non-numeric current cell becomes NaN and never blocks the run). On each sample sheet the
+dataset's raw-label block is followed by one image (`sweep_map.render_sweep_grid`, Pillow): the
+`rows x nodes` grid with every device's `log10|I|` vs `V` curve, drawn with one axis pair per
+sample (x from the lowest to the highest voltage; y from `1e-13 A` — the floor applied before the
+logarithm — up to the decade of the sample's largest |I|), coloured by the device's label in that
+dataset, grey where the coordinate has no usable sweep. Two datasets with identical sweep tables
+(an ImageMarker write-back of the measurement workbook) are drawn once, under the first of them.
+`options.sweep_maps` (default on; inert without `spatial_maps`) switches the block off. The README
+sheet records how many grids were embedded (*Measurement sweep maps*) and verification compares
+that count with the images actually present in the reopened workbook. No metric reads the sweeps.
 
 ### Comparison groups and the Local LLM group (v0.6.0)
 

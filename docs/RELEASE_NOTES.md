@@ -1,3 +1,20 @@
+# v0.9.0
+
+- Sample map sheets now show the measurement itself: a dataset exported by R2R-TXT-Converter
+  (`_merged.csv` voltage-headed current columns, `_raw.csv` `I_<voltage>V` columns, or the same
+  table as `.xlsx`) keeps every device's gate sweep, and right below that dataset's raw-label map
+  the sheet embeds one image with all `rows x nodes` transfer curves (`log10|I|` vs `V`, one axis
+  pair per sample, curve coloured by the device's label, grey where no usable sweep). Identical
+  sweep tables (an ImageMarker write-back) are drawn once; datasets without sweep columns are
+  unchanged.
+- New output option "map 시트에 측정 transfer curve 격자 포함" (`options.sweep_maps`, default on,
+  inert without spatial maps); README records the number of embedded grids and reopen
+  verification checks it against the images present. The self-test's synthetic measurement now
+  carries sweep columns so the packaged build exercises the image path.
+- Application icon (report page with the 26 x 38 label map and a verdict badge) for the window,
+  taskbar, EXE and installer; `assets/icon.svg` + `scripts/build_icon.py`.
+- New dependency `Pillow==12.3.0`.
+
 # v0.8.0
 
 - Partial sample blocks are opt-in: the block-selection dialog gains "불완전한 블록도 포함 허용".

@@ -386,6 +386,12 @@ class ProfileOptions:
     spatial_maps: bool = True
     color_only_copy: bool = True
     joined_data: bool = True
+    sweep_maps: bool = True
+    """Draw each sample's measured transfer curves (rows x nodes grid) on its map sheet.
+
+    Only datasets whose source carries the converter's current-sweep columns
+    contribute; the option needs ``spatial_maps`` and is otherwise inert.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -393,6 +399,7 @@ class ProfileOptions:
             "spatial_maps": self.spatial_maps,
             "color_only_copy": self.color_only_copy,
             "joined_data": self.joined_data,
+            "sweep_maps": self.sweep_maps,
         }
 
     @classmethod
@@ -402,6 +409,7 @@ class ProfileOptions:
             bool(data.get("spatial_maps", True)),
             bool(data.get("color_only_copy", True)),
             bool(data.get("joined_data", True)),
+            bool(data.get("sweep_maps", True)),
         )
 
 

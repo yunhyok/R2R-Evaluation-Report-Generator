@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.8.0"
+  #define AppVersion "0.9.0"
 #endif
 #define AppPublisher "Yunhyok"
 #define AppExeName "R2REvaluationReportGenerator.exe"
@@ -39,6 +39,7 @@ CloseApplications=yes
 CloseApplicationsFilter={#AppExeName}
 RestartApplications=no
 UninstallDisplayIcon={app}\{#AppExeName}
+SetupIconFile=..\src\r2r_evaluation_report\assets\icon.ico
 LicenseFile=..\LICENSE
 
 [Languages]

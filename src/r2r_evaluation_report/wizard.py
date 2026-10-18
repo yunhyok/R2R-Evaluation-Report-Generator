@@ -52,6 +52,7 @@ from .profile import (
     label_orders,
     suggest_role,
 )
+from .resources import apply_application_identity
 from .schemes import EXCLUDE, SchemeRegistry, load_registry
 from .workbook import derive_color_only_path
 
@@ -743,6 +744,11 @@ class WizardWindow(QMainWindow):
         row.addWidget(browse)
         self.maps_check = QCheckBox("샘플별 공간 map 시트 (S01…) 포함")
         self.maps_check.setChecked(True)
+        self.sweeps_check = QCheckBox(
+            "map 시트에 측정 transfer curve 격자 포함 (전압 열이 있는 측정 데이터셋)"
+        )
+        self.sweeps_check.setChecked(True)
+        self.maps_check.toggled.connect(self.sweeps_check.setEnabled)
         self.joined_check = QCheckBox("Joined_Data 시트 포함")
         self.joined_check.setChecked(True)
         self.color_only_check = QCheckBox("색상 전용 사본(-color-only.xlsx) 함께 생성")
@@ -752,6 +758,7 @@ class WizardWindow(QMainWindow):
         layout.addRow("리포트 제목", self.title_edit)
         layout.addRow("출력 통합문서", row)
         layout.addRow(self.maps_check)
+        layout.addRow(self.sweeps_check)
         layout.addRow(self.joined_check)
         layout.addRow(self.color_only_check)
         layout.addRow(save_profile)
@@ -1307,6 +1314,7 @@ class WizardWindow(QMainWindow):
                 self.maps_check.isChecked(),
                 self.color_only_check.isChecked(),
                 self.joined_check.isChecked(),
+                sweep_maps=self.sweeps_check.isChecked(),
             ),
         )
 
@@ -1340,6 +1348,7 @@ class WizardWindow(QMainWindow):
         self.comparisons = list(profile.comparisons)
         self.title_edit.setText(profile.options.title)
         self.maps_check.setChecked(profile.options.spatial_maps)
+        self.sweeps_check.setChecked(profile.options.sweep_maps)
         self.joined_check.setChecked(profile.options.joined_data)
         self.color_only_check.setChecked(profile.options.color_only_copy)
         self.status_label.setText("프로파일을 불러왔습니다. '불러오기·정렬 검사'를 실행하세요.")
@@ -1363,6 +1372,15 @@ class WizardWindow(QMainWindow):
         for spec in profile.comparisons:
             lines.append(f"  - {spec.id} [{KIND_TITLES[spec.kind]}] {spec.title}")
         lines += ["", f"출력: {self.output_edit.text().strip()}"]
+        if profile.options.spatial_maps:
+            lines.append(
+                "공간 map: 포함"
+                + (
+                    " (측정 transfer curve 격자 포함 — 전압 열이 있는 데이터셋)"
+                    if profile.options.sweep_maps
+                    else " (transfer curve 격자 제외)"
+                )
+            )
         if profile.options.color_only_copy:
             lines.append(f"색상 전용: {derive_color_only_path(self.output_edit.text().strip())}")
         lines.append(
@@ -1516,7 +1534,9 @@ class WizardWindow(QMainWindow):
 
 def run_wizard(argv: list[str] | None = None, *, smoke_test: bool = False) -> int:
     app = QApplication.instance() or QApplication(argv or [])
+    icon = apply_application_identity(app)
     window = WizardWindow()
+    window.setWindowIcon(icon)
     window.show()
     if smoke_test:
         QTimer.singleShot(1500, app.quit)

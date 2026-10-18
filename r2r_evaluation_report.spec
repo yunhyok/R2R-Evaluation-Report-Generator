@@ -2,6 +2,7 @@
 from pathlib import Path
 
 project = Path(SPECPATH)
+assets = project / "src" / "r2r_evaluation_report" / "assets"
 
 a = Analysis(
     [str(project / "scripts" / "pyinstaller_entry.py")],
@@ -12,6 +13,7 @@ a = Analysis(
             str(project / "src" / "r2r_evaluation_report" / "schemes" / "label_schemes.json"),
             "r2r_evaluation_report/schemes",
         ),
+        (str(assets), "r2r_evaluation_report/assets"),
     ],
     hiddenimports=[
         "PySide6",
@@ -20,7 +22,12 @@ a = Analysis(
         "PySide6.QtWidgets",
         "openpyxl",
         "openpyxl.chart",
+        "openpyxl.drawing.image",
         "openpyxl.styles",
+        "PIL",
+        "PIL.Image",
+        "PIL.ImageDraw",
+        "PIL.ImageFont",
         "scipy.stats",
         "scipy.special",
         "scipy._lib.messagestream",
@@ -67,4 +74,5 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon=str(assets / "icon.ico"),
 )

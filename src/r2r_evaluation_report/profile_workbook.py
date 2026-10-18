@@ -12,19 +12,23 @@ selected when the evaluation object is a :class:`profile.ProfileResult`.
 from __future__ import annotations
 
 import json
+import math
+import re
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
 from colorsys import hsv_to_rgb
+from io import BytesIO
 from typing import Any
 
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.pagebreak import Break
 
 from . import association as assoc
-from .core import _normalise
+from .core import ParsedSheet, SweepTable, _normalise
 from .profile import (
     ROLE_TITLES,
     AssociationStats,
@@ -38,6 +42,7 @@ from .profile import (
     role_title,
 )
 from .schemes import MISSING
+from .sweep_map import DEFAULT_CURVE_COLOR, render_sweep_grid
 from .workbook import (
     MAP_BORDER,
     WorkbookCancelled,
@@ -53,6 +58,8 @@ from .workbook import (
 REPORT_MODE = "profile"
 MAP_TOP = 8  # first map heading row; each block is grid.rows + MAP_GAP rows tall
 MAP_GAP = 10
+DEFAULT_ROW_PX = 20  # Excel's default 15 pt row at 96 dpi; sizes the transfer-curve block
+SWEEP_MAPS_PATTERN = re.compile(r"^(\d+) transfer-curve grid")
 KNOWN_STYLES: dict[str, tuple[str, str]] = {
     # legacy electrical
     "pass": ("P", "00FFFF"),
@@ -269,6 +276,46 @@ def _dataset_title(result: ProfileResult, dataset_id: str) -> str:
     return result.profile.dataset(dataset_id).label
 
 
+def _member_sheet(result: ProfileResult, dataset_id: str, title: str) -> ParsedSheet | None:
+    for sheet in result.datasets[dataset_id].sheets:
+        if sheet.title == title:
+            return sheet
+    return None
+
+
+def sweep_sources(
+    result: ProfileResult, sample: SampleData
+) -> list[tuple[DatasetSpec, SweepTable]]:
+    """Datasets whose aligned sheet carries measured sweeps, one entry per distinct table.
+
+    Empty unless both ``spatial_maps`` and ``sweep_maps`` are on.  A label file
+    written back into the converter's workbook (an ImageMarker export) carries the
+    same sweeps as the measurement itself; a table identical to one already listed
+    is skipped, so each sample shows every distinct measurement once, under the
+    first dataset (profile order) that carries it.
+    """
+    options = result.profile.options
+    if not (options.spatial_maps and options.sweep_maps):
+        return []
+    found: list[tuple[DatasetSpec, SweepTable]] = []
+    for spec in result.profile.datasets:
+        title = sample.members.get(spec.id)
+        if title is None:
+            continue
+        sheet = _member_sheet(result, spec.id, title)
+        if sheet is None or sheet.sweeps is None:
+            continue
+        if any(table.same_data(sheet.sweeps) for _spec, table in found):
+            continue
+        found.append((spec, sheet.sweeps))
+    return found
+
+
+def sweep_map_count(result: ProfileResult) -> int:
+    """How many transfer-curve grids the report embeds (recorded on the README sheet)."""
+    return sum(len(sweep_sources(result, sample)) for sample in result.samples)
+
+
 def _label_counts(result: ProfileResult, dataset_id: str) -> tuple[Counter, int]:
     """Record count per reported label (scheme spelling; case-insensitive match) and the total."""
     dataset = result.datasets[dataset_id]
@@ -383,7 +430,15 @@ def _readme(wb: Workbook, result: ProfileResult, *, show_map_codes: bool) -> Non
         "Map display mode",
         "Codes + fills" if show_map_codes else "Color fills only; map body codes blank",
     )
-    for row in range(2, 8):
+    sweep_count = sweep_map_count(result)
+    if not (profile.options.spatial_maps and profile.options.sweep_maps):
+        sweep_text = "off"
+    elif sweep_count == 0:
+        sweep_text = "none (no dataset carries the converter's current-sweep columns)"
+    else:
+        sweep_text = f"{sweep_count} transfer-curve grid(s) embedded on the sample map sheets"
+    ws["A8"], ws["B8"] = "Measurement sweep maps", sweep_text
+    for row in range(2, 9):
         ws.cell(row, 1).font = Font(bold=True)
     row = 9
     _set_section(ws.cell(row, 1), "Datasets")
@@ -652,13 +707,14 @@ def _sample_sheet(
         (row, node) for row in range(1, grid.rows + 1) for node in range(1, grid.nodes + 1)
     ]
 
-    def next_block() -> int:
+    def next_block(height: int = block) -> int:
         nonlocal heading
         current = heading
-        heading += block
+        heading += height
         breaks.append(heading - 3)
         return current
 
+    sweep_tables = {spec.id: table for spec, table in sweep_sources(result, sample)}
     for spec in result.profile.datasets:
         if spec.id not in sample.members:
             continue
@@ -692,6 +748,9 @@ def _sample_sheet(
             counts,
             outside_total=(NO_DATA_LABEL,),
         )
+        table = sweep_tables.get(spec.id)
+        if table is not None:
+            _sweep_block(ws, spec, table, coords, grid_keys, grid, palette, next_block)
     for comparison in result.comparisons:
         spec = comparison.spec
         if spec.a not in sample.members or spec.b not in sample.members:
@@ -754,6 +813,47 @@ def _sample_sheet(
     ws.print_area = f"A1:{get_column_letter(panel_col + 4)}{last_row}"
     for break_row in breaks[:-1]:
         ws.row_breaks.append(Break(id=break_row))
+
+
+def _sweep_block(
+    ws: Any,
+    spec: DatasetSpec,
+    table: SweepTable,
+    coords: Mapping[tuple[int, int], Any],
+    grid_keys: Sequence[tuple[int, int]],
+    grid: Any,
+    palette: Mapping[str, tuple[str, str]],
+    next_block: Callable[[int], int],
+) -> None:
+    """The measurement itself: every device's sweep drawn in the grid, coloured by its label."""
+    traces: dict[tuple[int, int], tuple[Any, str]] = {}
+    for key in grid_keys:
+        record = coords.get(key)
+        item = record.records.get(spec.id) if record is not None else None
+        trace = table.trace(item.sweep_index) if item is not None else None
+        if trace is None:
+            continue
+        style = palette.get(item.value)
+        traces[key] = (trace, style[1] if style else DEFAULT_CURVE_COLOR)
+    rendered = render_sweep_grid(grid.rows, grid.nodes, table.voltages, traces)
+    image_rows = math.ceil(rendered.height / DEFAULT_ROW_PX) + 1
+    top = next_block(image_rows + MAP_GAP)
+    _set_section(
+        ws.cell(top - 1, 3),
+        f"{spec.label} — measured transfer curves ({rendered.traces}/{grid.size} traces)",
+    )
+    # openpyxl re-reads the picture when saving, so hand it a file-like PNG, not the
+    # in-memory PIL image (which has no backing file).
+    ws.add_image(XLImage(BytesIO(rendered.png_bytes())), f"C{top}")
+    notes = (
+        f"Each cell: the measured gate sweep of that device ({table.points} points), "
+        "drawn with one axis pair for the whole sample.",
+        rendered.axis_note + "; |I| is floored at 1e-13 A on the log axis.",
+        f"Curve colour: the device's {spec.label} label (legend above). "
+        "Grey cell: no sweep at that coordinate (no data, or currents not numeric).",
+    )
+    for offset, note in enumerate(notes, 1):
+        ws.cell(top + image_rows + offset, 3, note)
 
 
 def _write_table(ws: Any, row: int, col: int, title: str, headers, rows) -> int:
@@ -1284,6 +1384,16 @@ def verify_profile_workbook(wb: Workbook) -> None:
                     raise ValueError(f"{name}: invalid map cell {cell.coordinate}")
         if ws.page_setup.orientation != "landscape":
             raise ValueError(f"{name}: expected landscape")
+    recorded = readme["B8"].value
+    if recorded is not None:
+        match = SWEEP_MAPS_PATTERN.match(str(recorded))
+        expected_images = int(match.group(1)) if match else 0
+        embedded = sum(len(wb[name]._images) for name in samples)
+        if embedded != expected_images:
+            raise ValueError(
+                f"README records {expected_images} transfer-curve grid(s) but the sample "
+                f"sheets carry {embedded} image(s)"
+            )
     for name in comparisons:
         ws = wb[name]
         if not str(ws["A1"].value).startswith("R2R Comparison — "):

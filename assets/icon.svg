@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!--
+    R2R Evaluation Report Generator icon.
+    Concept: an evaluation workbook page carrying the 26 x 38 spatial label map
+    (coloured device cells in the report's own palette) with a verdict badge —
+    the program aligns several label datasets, draws the per-sample map and
+    scores the comparison.  Shapes stay bold so the 16 px taskbar size still
+    reads as "report page with a coloured map and a check".
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A6A9E"/>
+      <stop offset="1" stop-color="#153657"/>
+    </linearGradient>
+    <linearGradient id="badge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4FD48E"/>
+      <stop offset="1" stop-color="#249C62"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#tile)"/>
+  <!-- report page with a folded corner -->
+  <path d="M60 34 H164 L204 74 V212 a12 12 0 0 1 -12 12 H72 a12 12 0 0 1 -12 -12 Z" fill="#FFFFFF"/>
+  <path d="M164 34 V62 a12 12 0 0 0 12 12 H204 Z" fill="#D5E2EF"/>
+  <!-- title bar of the sheet -->
+  <rect x="76" y="50" width="70" height="10" rx="5" fill="#1F4E78"/>
+  <!-- spatial map: device cells in the workbook palette (cyan normal, magenta open,
+       orange short, red none, blue no-active, purple invalid) -->
+  <g>
+    <rect x="76" y="74" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="94" y="74" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="112" y="74" width="14" height="14" rx="2" fill="#E64CE6"/>
+    <rect x="130" y="74" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="148" y="74" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="166" y="74" width="14" height="14" rx="2" fill="#F5B01A"/>
+
+    <rect x="76" y="92" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="94" y="92" width="14" height="14" rx="2" fill="#F04C46"/>
+    <rect x="112" y="92" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="130" y="92" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="148" y="92" width="14" height="14" rx="2" fill="#E64CE6"/>
+    <rect x="166" y="92" width="14" height="14" rx="2" fill="#27C4E6"/>
+
+    <rect x="76" y="110" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="94" y="110" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="112" y="110" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="130" y="110" width="14" height="14" rx="2" fill="#F5B01A"/>
+    <rect x="148" y="110" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="166" y="110" width="14" height="14" rx="2" fill="#27C4E6"/>
+
+    <rect x="76" y="128" width="14" height="14" rx="2" fill="#2FA3DE"/>
+    <rect x="94" y="128" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="112" y="128" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="130" y="128" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="148" y="128" width="14" height="14" rx="2" fill="#8A4FC2"/>
+    <rect x="166" y="128" width="14" height="14" rx="2" fill="#27C4E6"/>
+
+    <rect x="76" y="146" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="94" y="146" width="14" height="14" rx="2" fill="#E64CE6"/>
+    <rect x="112" y="146" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="130" y="146" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="148" y="146" width="14" height="14" rx="2" fill="#27C4E6"/>
+    <rect x="166" y="146" width="14" height="14" rx="2" fill="#F04C46"/>
+  </g>
+  <!-- summary rows under the map -->
+  <rect x="76" y="172" width="104" height="8" rx="4" fill="#C9D6E5"/>
+  <rect x="76" y="188" width="72" height="8" rx="4" fill="#C9D6E5"/>
+  <!-- verdict badge -->
+  <circle cx="190" cy="196" r="38" fill="url(#badge)" stroke="#FFFFFF" stroke-width="8"/>
+  <path d="M170 197 L184 211 L212 181" fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
