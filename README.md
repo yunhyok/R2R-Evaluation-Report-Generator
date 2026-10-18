@@ -33,18 +33,35 @@ Excel workbook으로 생성하는 한국어 Windows 데스크톱 애플리케이
 3. **비교 정의** — 비교를 0개 이상 추가합니다. *자기 평가*는 A(정답)·B(예측)를 공통 범주로
    매핑(프리셋 또는 직접 지정)하고, *교차 연관*은 원본 라벨 그대로 또는 매핑 후 대칭 지표와
    관심 2×2 셀(예: `E-Invalid × BAD`)을 지정합니다.
-4. **출력 옵션** — 출력 경로, 공간 map/Joined_Data/색상 전용 사본 포함 여부, 제목. 프로파일
-   JSON으로 저장·불러오기할 수 있습니다.
+4. **출력 옵션** — 출력 경로, 공간 map/Joined_Data/색상 전용 사본 포함 여부, 측정 transfer
+   curve 격자 포함 여부, 제목. 프로파일 JSON으로 저장·불러오기할 수 있습니다.
 5. **생성** — 요약을 확인하고 Excel을 생성합니다. `<stem>.profile.json`이 함께 저장되며
    `--profile FILE`로 동일 리포트를 다시 만들 수 있습니다.
 
 `--legacy-ui`는 v0.4의 두 입력 화면을 엽니다(측정·예측 비교, 단독 보고서).
 
+### 측정 transfer curve 격자 (v0.9.0)
+
+샘플별 공간 map 시트(S01…)는 데이터셋마다 라벨 map을 그리는데, 라벨은 판정 *결과*일 뿐
+측정 *그 자체*는 아닙니다. v0.9.0부터는 R2R-TXT-Converter의 `_merged.csv`(헤더가 전압값인
+전류 열, 예 `-20.00000`)나 `_raw.csv`(`I_<전압>V` 열), 또는 같은 표를 저장한 `.xlsx`를 데이터셋으로
+넣으면 그 데이터셋의 라벨 map 바로 아래에 **측정 transfer curve 격자**가 함께 들어갑니다.
+26 × 38 칸마다 그 소자의 게이트 sweep을 `log10|I|` 대 `V` 곡선으로 그리고, 곡선 색은 그
+데이터셋의 라벨(위 범례와 같은 색)입니다. 축은 샘플 전체가 공유하며(x: 전압 최소→최대,
+y: `1e-13 A`부터 샘플 최대 전류의 자릿수까지, 로그), sweep이 없거나 숫자가 아닌 좌표는 회색
+칸으로 남습니다. 같은 sweep을 가진 두 데이터셋(예: 측정 workbook에 육안 라벨을 덮어쓴
+ImageMarker 사본)은 한 번만 그립니다. 격자는 Pillow로 그린 그림 한 장(샘플당 약 1250 × 650 px,
+수십 KB)으로 시트에 삽입되며 색상 전용 사본에도 그대로 들어갑니다. README 시트의
+*Measurement sweep maps* 행에 삽입된 격자 수가 기록되고, 재개방 검증이 실제 그림 수와
+대조합니다. 4단계의 **map 시트에 측정 transfer curve 격자 포함** 확인란(프로파일
+`options.sweep_maps`, 기본 켜짐)으로 끌 수 있고, 공간 map 자체를 끄면 함께 꺼집니다.
+비교 지표·라벨 집계는 영향을 받지 않습니다.
+
 ## 지원 입력
 
 | 출처 | 형식 | 식별 |
 |---|---|---|
-| R2R-TXT-Converter 측정 | CSV/XLSX `Name, Row, Node, Status` | 이름·좌표 |
+| R2R-TXT-Converter 측정 | CSV/XLSX `Name, Row, Node, Status` (+ 전압 열이 있으면 transfer curve 격자) | 이름·좌표 |
 | R2R-Machine-Learning 예측 (전기 라벨 학습) | CSV/XLSX `name, row, node, prediction` (+ `confidence`, `prob_Normal/prob_Open/prob_Short` 또는 E-5 `prob_*`) | 이름·좌표; 비교군 `electrical_ml` 제안 |
 | R2R-Machine-Learning 예측 (`visual_3class`, 0.6.0+) | 같은 `predictions.csv` 구조에 `prediction` = `Good / Bad / Open`, `prob_Good / prob_Bad / prob_Open` | 이름·좌표; 비교군 `optical_ml`, 체계 `optical_3`(GOOD / BAD / OPEN으로 표기) 제안 |
 | ImageMarker 2.x 육안 라벨 | 측정 XLSX의 `Status` 덮어쓰기본 또는 `name,row,node,label` CSV | 이름·좌표 |
@@ -153,6 +170,10 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m r2r_evaluation_report --profile run.profile.json --output run.xlsx
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 ```
+
+앱 아이콘(리포트 페이지 위의 26 × 38 라벨 map과 판정 체크 배지)의 원본은 `assets/icon.svg`이며,
+`python scripts/build_icon.py`가 창·EXE·설치 프로그램이 쓰는
+`src/r2r_evaluation_report/assets/icon.png` / `icon.ico`를 다시 만듭니다.
 
 격리 installer 수명주기 검증은 disposable AppId 전용 installer에만 허용됩니다. v0.3.0의
 실제 연구 데이터와 paired workbook, source UI DPI smoke, packaged self-test/GUI DPI smoke,
