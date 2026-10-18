@@ -249,6 +249,11 @@ class ParsedSheet:
     def title(self) -> str:
         return self.sample_name or self.source.worksheet or "CSV"
 
+    @property
+    def unique_coordinates(self) -> int:
+        """Distinct coordinates present; less than the grid size for a partial block."""
+        return len({record.coordinate for record in self.records})
+
 
 @dataclass(frozen=True)
 class ParsedDataset:
@@ -313,9 +318,11 @@ class SampleCandidate:
         return self.name if self.occurrence == 0 else f"{self.name} #{self.occurrence + 1}"
 
 
-def default_sample_selection(candidates: Iterable[SampleCandidate]) -> dict[str, str]:
-    """Every complete candidate under its default title (incomplete blocks are skipped)."""
-    return {item.key: item.default_title for item in candidates if item.complete}
+def default_sample_selection(
+    candidates: Iterable[SampleCandidate], *, include_partial: bool = False
+) -> dict[str, str]:
+    """Every complete candidate under its default title; partial blocks only when asked."""
+    return {item.key: item.default_title for item in candidates if item.complete or include_partial}
 
 
 def selection_needed(candidates: Iterable[SampleCandidate]) -> bool:
@@ -939,13 +946,15 @@ def _sample_sheets(
     header_map: Mapping[str, str],
     grid: Grid = DEFAULT_GRID,
     samples: Mapping[str, str] | None = None,
+    allow_partial: bool = False,
 ) -> tuple[ParsedSheet, ...]:
     """Split a worksheet into sample units.
 
     Without ``samples`` every ``(Name, occurrence)`` block becomes a sheet titled by
     its Name (the strict parser guarantees one complete block per Name).  With
-    ``samples`` (candidate key -> title) only the chosen blocks are kept, each must
-    be complete, and titles must be unique.
+    ``samples`` (candidate key -> title) only the chosen blocks are kept and titles
+    must be unique; a chosen block must be complete unless ``allow_partial`` lets a
+    block with fewer coordinates than the grid stand as a partial sample.
     """
     sheets: list[ParsedSheet] = []
     worksheet = metadata.worksheet or "CSV"
@@ -960,10 +969,11 @@ def _sample_sheets(
                 continue
             title = title.strip() or name
             unique = len({item.coordinate for item in group})
-            if unique != grid.size:
+            if unique != grid.size and not allow_partial:
                 raise DataContractError(
                     f"{metadata.path} [{worksheet}]: selected block {name!r} #{occurrence + 1} "
-                    f"has {unique} unique coordinates; exactly {grid.size} are required"
+                    f"has {unique} unique coordinates; exactly {grid.size} are required "
+                    "(enable partial blocks to include it)"
                 )
             previous = seen_titles.get(_normalise(title))
             if previous is not None:
@@ -997,6 +1007,7 @@ def parse_dataset(
     grid: Grid = DEFAULT_GRID,
     model_column: str | None = None,
     samples: Mapping[str, str] | None = None,
+    allow_partial: bool = False,
 ) -> ParsedDataset:
     """Parse every selected contract-bearing worksheet into immutable records.
 
@@ -1008,9 +1019,21 @@ def parse_dataset(
     ``samples`` (candidate key -> sample title, see :func:`inspect_samples`) turns on
     lenient parsing: repeated Names and incomplete blocks no longer reject the file;
     only the listed complete blocks become samples.  Without it the historical
-    strict contract applies.
+    strict contract applies.  ``allow_partial`` (with ``samples``) additionally
+    accepts a chosen block that covers only part of the grid: its records are kept
+    as they are, the missing coordinates simply have no value in that sample, and
+    every comparison scores only the coordinates present on both sides.
     """
-    return _parse(path, kind, worksheets, grid, model_column, samples, inspect=False)
+    return _parse(
+        path,
+        kind,
+        worksheets,
+        grid,
+        model_column,
+        samples,
+        inspect=False,
+        allow_partial=allow_partial,
+    )
 
 
 def inspect_samples(
@@ -1034,6 +1057,7 @@ def _parse(
     samples: Mapping[str, str] | None,
     *,
     inspect: bool,
+    allow_partial: bool = False,
 ) -> Any:
     strict = samples is None and not inspect
     found: list[SampleCandidate] = []
@@ -1058,7 +1082,7 @@ def _parse(
         records = _parse_rows(enumerate(rows, start=2), header_map, kind, metadata, grid, strict)
         if inspect:
             return _candidates(metadata, records, grid)
-        parsed = _sample_sheets(kind, metadata, records, header_map, grid, samples)
+        parsed = _sample_sheets(kind, metadata, records, header_map, grid, samples, allow_partial)
         if not parsed:
             raise DataContractError(f"{source}: no sample block was selected")
         return ParsedDataset(kind, str(source), parsed, grid)
@@ -1133,7 +1157,9 @@ def _parse(
             if inspect:
                 found.extend(_candidates(metadata, records, grid))
                 continue
-            parsed.extend(_sample_sheets(kind, metadata, records, header_map, grid, samples))
+            parsed.extend(
+                _sample_sheets(kind, metadata, records, header_map, grid, samples, allow_partial)
+            )
         if inspect:
             return tuple(found)
         if samples is None:

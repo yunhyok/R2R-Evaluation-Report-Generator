@@ -401,8 +401,11 @@ class SampleSelectionDialog(QDialog):
 
     Shown when a file repeats a Name (the same array measured twice, or two source
     sheets sharing a Name) or contains incomplete arrays.  Complete blocks are
-    included by default under ``Name`` / ``Name #2`` …; incomplete blocks cannot be
-    included; identical blocks are flagged so a duplicated sheet can be dropped.
+    included by default under ``Name`` / ``Name #2`` …; identical blocks are flagged
+    so a duplicated sheet can be dropped.  An incomplete block can be included only
+    after the operator turns on "불완전한 블록도 포함 허용": it then becomes a partial
+    sample (recorded in the profile as ``allow_partial``) whose missing coordinates
+    are never scored.
     """
 
     def __init__(
@@ -411,12 +414,14 @@ class SampleSelectionDialog(QDialog):
         dataset_label: str,
         candidates: Sequence[SampleCandidate],
         existing: Mapping[str, str] | None = None,
+        allow_partial: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"샘플 블록 선택 — {dataset_label}")
         self.setMinimumSize(1000, 560)
         self.candidates = list(candidates)
         self.selection: dict[str, str] = {}
+        self.allow_partial = bool(allow_partial)
         layout = QVBoxLayout(self)
         groups = backend.selection_summary(self.candidates)
         repeated = sum(1 for items in groups.values() if len(items) > 1)
@@ -425,8 +430,9 @@ class SampleSelectionDialog(QDialog):
             f"이 파일에는 이름이 반복되는 샘플 {repeated}개, 불완전한 블록 {incomplete}개가 "
             "있습니다. 포함할 블록을 고르고 필요하면 샘플 이름을 바꾸세요. 같은 이름의 블록을 "
             "둘 다 포함하면 별도 샘플(#2, #3…)로 처리되고, 하나만 남기면 그 블록이 그 이름의 "
-            "샘플이 됩니다. 불완전한 블록(좌표 수 부족)은 포함할 수 없습니다. "
-            "'동일 내용'은 다른 블록과 좌표·라벨이 완전히 같은 경우입니다."
+            "샘플이 됩니다. 불완전한 블록(좌표 수 부족)은 아래 '불완전한 블록도 포함 허용'을 "
+            "켠 뒤에만 포함할 수 있으며, 그 경우 있는 좌표만 비교하고 리포트에 적용 범위를 "
+            "기록합니다. '동일 내용'은 다른 블록과 좌표·라벨이 완전히 같은 경우입니다."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -434,6 +440,13 @@ class SampleSelectionDialog(QDialog):
         self.only_issues.setChecked(True)
         self.only_issues.toggled.connect(self._refresh_visibility)
         layout.addWidget(self.only_issues)
+        self.allow_partial_box = QCheckBox(
+            "불완전한 블록도 포함 허용 — 좌표가 있는 소자만 비교하고, 없는 좌표는 map에 "
+            "'no data'로, 비교에는 '짝 없는 좌표'로 기록합니다 (프로파일에 저장)"
+        )
+        self.allow_partial_box.setChecked(self.allow_partial)
+        self.allow_partial_box.toggled.connect(self._partial_toggled)
+        layout.addWidget(self.allow_partial_box)
         self.table = _table(
             (
                 "포함",
@@ -458,8 +471,8 @@ class SampleSelectionDialog(QDialog):
             issue = len(group) > 1 or not item.complete
             self._issue_rows.append(issue)
             include = QCheckBox()
-            include.setChecked(item.key in selection)
-            include.setEnabled(item.complete)
+            include.setChecked(item.key in selection and (item.complete or self.allow_partial))
+            include.setEnabled(item.complete or self.allow_partial)
             include.toggled.connect(self._refresh_problems)
             self.table.setCellWidget(row, 0, include)
             title = _item(selection.get(item.key, item.default_title), editable=True)
@@ -472,7 +485,7 @@ class SampleSelectionDialog(QDialog):
             self.table.setItem(row, 6, _item(str(item.row_count)))
             self.table.setItem(row, 7, _item(f"{item.unique_coordinates}/{item.grid_size}"))
             if not item.complete:
-                status = "불완전"
+                status = self._partial_status(item)
             elif item.content_digest in digests:
                 status = f"동일 내용 ({digests[item.content_digest]})"
             else:
@@ -496,10 +509,13 @@ class SampleSelectionDialog(QDialog):
         buttons = QHBoxLayout()
         all_complete = QPushButton("완전한 블록 모두 포함")
         first_only = QPushButton("이름마다 첫 완전 블록만")
+        self.all_blocks_button = QPushButton("불완전 블록까지 모두 포함")
         all_complete.clicked.connect(lambda: self._bulk(first_only=False))
         first_only.clicked.connect(lambda: self._bulk(first_only=True))
+        self.all_blocks_button.clicked.connect(self._bulk_including_partial)
         buttons.addWidget(all_complete)
         buttons.addWidget(first_only)
+        buttons.addWidget(self.all_blocks_button)
         buttons.addStretch(1)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(self._accept)
@@ -513,6 +529,32 @@ class SampleSelectionDialog(QDialog):
         only = self.only_issues.isChecked()
         for row, issue in enumerate(self._issue_rows):
             self.table.setRowHidden(row, only and not issue)
+
+    def _partial_status(self, item: SampleCandidate) -> str:
+        return (
+            f"부분 ({item.unique_coordinates}/{item.grid_size})" if self.allow_partial else "불완전"
+        )
+
+    def _partial_toggled(self, checked: bool) -> None:
+        """Enable (or disable and untick) the include boxes of incomplete blocks."""
+        self.allow_partial = bool(checked)
+        for row, item in enumerate(self.candidates):
+            if item.complete:
+                continue
+            box = self.table.cellWidget(row, 0)
+            box.setEnabled(self.allow_partial)
+            if not self.allow_partial:
+                box.setChecked(False)
+            self.table.item(row, 8).setText(self._partial_status(item))
+        self._refresh_problems()
+
+    def _bulk_including_partial(self) -> None:
+        """Turn partial blocks on and include every block under its default title."""
+        self.allow_partial_box.setChecked(True)
+        for row, item in enumerate(self.candidates):
+            self.table.cellWidget(row, 0).setChecked(True)
+            self.table.item(row, 1).setText(item.default_title)
+        self._refresh_problems()
 
     def _bulk(self, *, first_only: bool) -> None:
         seen: set[str] = set()
@@ -539,12 +581,14 @@ class SampleSelectionDialog(QDialog):
         return selection
 
     def _refresh_problems(self, *_: Any) -> None:
-        problems = backend.validate_selection(self.candidates, self.current_selection())
+        problems = backend.validate_selection(
+            self.candidates, self.current_selection(), self.allow_partial
+        )
         self.problems_label.setText("\n".join(problems))
 
     def _accept(self) -> None:
         selection = self.current_selection()
-        problems = backend.validate_selection(self.candidates, selection)
+        problems = backend.validate_selection(self.candidates, selection, self.allow_partial)
         if problems:
             self.problems_label.setText("\n".join(problems))
             return
@@ -829,6 +873,7 @@ class WizardWindow(QMainWindow):
         grid: tuple[int, int] = (DEFAULT_GRID.rows, DEFAULT_GRID.nodes),
         dataset_id: str | None = None,
         samples: Mapping[str, str] | None = None,
+        allow_partial: bool = False,
     ) -> str:
         info = backend.inspect_source(path)
         existing = {spec.id for spec in self.dataset_specs()}
@@ -857,6 +902,7 @@ class WizardWindow(QMainWindow):
         # model combo's isEnabled() is False whenever the page is disabled during
         # a background job, which used to drop the model column mid-preflight.
         title_item.setData(Qt.UserRole + 3, bool(info.is_inspector))
+        title_item.setData(Qt.UserRole + 4, bool(allow_partial))
         self.dataset_table.setItem(row, 0, title_item)
         role_box = _combo(ROLE_TITLES.values(), ROLE_TITLES.get(role, ROLE_TITLES["other"]))
         self.dataset_table.setCellWidget(row, 1, role_box)
@@ -927,16 +973,20 @@ class WizardWindow(QMainWindow):
                     model,
                     title_item.text().strip(),
                     dict(title_item.data(Qt.UserRole + 2) or {}),
+                    bool(title_item.data(Qt.UserRole + 4)),
                 )
             )
         return specs
 
-    def set_samples(self, dataset_id: str, selection: Mapping[str, str]) -> None:
-        """Record the chosen sample blocks for a dataset (see SampleSelectionDialog)."""
+    def set_samples(
+        self, dataset_id: str, selection: Mapping[str, str], allow_partial: bool = False
+    ) -> None:
+        """Record the chosen sample blocks (and the partial-block consent) for a dataset."""
         for row in range(self.dataset_table.rowCount()):
             item = self.dataset_table.item(row, 0)
             if item.data(Qt.UserRole) == dataset_id:
                 item.setData(Qt.UserRole + 2, dict(selection))
+                item.setData(Qt.UserRole + 4, bool(allow_partial))
         self._invalidate_from(0)
 
     def _add_dataset_dialog(self) -> None:
@@ -976,6 +1026,7 @@ class WizardWindow(QMainWindow):
                 grid=(spec.grid_rows, spec.grid_nodes),
                 dataset_id=spec.id,
                 samples=spec.samples,
+                allow_partial=spec.allow_partial,
             )
 
     def run_preflight(self) -> None:
@@ -991,13 +1042,15 @@ class WizardWindow(QMainWindow):
         self._run(inspect_job, self._sample_inspection_done, "샘플 블록을 검사하는 중…")
 
     def _sample_inspection_done(self, pending: dict[str, tuple[SampleCandidate, ...]]) -> None:
-        labels = {spec.id: spec.label for spec in self.dataset_specs()}
+        specs_by_id = {spec.id: spec for spec in self.dataset_specs()}
         for dataset_id, candidates in pending.items():
-            selection = self.choose_samples(dataset_id, labels[dataset_id], candidates)
-            if selection is None:
+            spec = specs_by_id[dataset_id]
+            chosen = self.choose_samples(dataset_id, spec.label, candidates, spec.allow_partial)
+            if chosen is None:
                 self.status_label.setText("샘플 블록 선택을 취소했습니다. 검사를 다시 실행하세요.")
                 return
-            self.set_samples(dataset_id, selection)
+            selection, allow_partial = chosen
+            self.set_samples(dataset_id, selection, allow_partial)
         specs = self.dataset_specs()
 
         def job(progress):
@@ -1006,15 +1059,24 @@ class WizardWindow(QMainWindow):
         self._run(job, self._preflight_done, "파일을 읽고 샘플을 정렬하는 중…")
 
     def choose_samples(
-        self, dataset_id: str, label: str, candidates: Sequence[SampleCandidate]
-    ) -> dict[str, str] | None:
-        """Open the block-selection dialog; ``test_mode`` takes the default selection."""
+        self,
+        dataset_id: str,
+        label: str,
+        candidates: Sequence[SampleCandidate],
+        allow_partial: bool = False,
+    ) -> tuple[dict[str, str], bool] | None:
+        """Open the block-selection dialog; ``test_mode`` takes the default selection.
+
+        Returns ``(selection, allow_partial)`` or None when the operator cancelled.
+        """
         if self.test_mode:
-            return default_sample_selection(candidates)
-        dialog = SampleSelectionDialog(self, label, candidates)
+            return default_sample_selection(
+                candidates, include_partial=allow_partial
+            ), allow_partial
+        dialog = SampleSelectionDialog(self, label, candidates, allow_partial=allow_partial)
         if dialog.exec() != QDialog.Accepted:
             return None
-        return dialog.selection
+        return dialog.selection, dialog.allow_partial
 
     def _preflight_done(self, load: backend.LoadResult) -> None:
         self.load = load
@@ -1293,7 +1355,7 @@ class WizardWindow(QMainWindow):
             lines.append(
                 f"  - {spec.label} [{ROLE_TITLES.get(spec.role, spec.role)}] "
                 f"체계={spec.scheme or '미등록'} 격자={spec.grid_rows}x{spec.grid_nodes}"
-                f" — {spec.path}"
+                f"{' 부분 블록 허용' if spec.allow_partial else ''} — {spec.path}"
             )
         lines += ["", f"정렬된 샘플: {len(profile.alignments)}", "", "비교:"]
         if not profile.comparisons:

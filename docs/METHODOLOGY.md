@@ -227,6 +227,32 @@ identity-mapped reference comparison of `GOOD/BAD/OPEN` against `Good/Bad/Open` 
 confusion matrix with accuracy 0 and no blocking error — the kind of silent inference the profile
 report is designed to refuse.
 
+### Partial sample blocks (v0.8.0)
+
+The historical contract is one complete `rows × nodes` array per sample. Some sources cannot
+meet it — an Inspector export of 20 × 24 arrays, a sheet cut short, a re-measurement that stopped
+early — and until v0.7.0 such a file could not proceed at all when every block was incomplete.
+From v0.8.0 the operator may admit a block that covers only part of the grid as a **partial
+sample**; the consent is explicit (the "불완전한 블록도 포함 허용" box in the block-selection
+dialog), stored in the profile as `datasets[].allow_partial`, and honoured by `--profile`.
+Without it the strict contract is unchanged.
+
+* **Scoring.** A partial sample's missing coordinates have no value. Every comparison scores only
+  coordinates present on both sides; a coordinate present on one side only is counted as
+  **unpaired** (overall and per sample, next to *Pairs* and *Excluded records*) and never
+  scored, imputed or treated as a mismatch. Metrics computed on a partial sample therefore
+  describe the covered region only; *Pairs* states the denominator.
+* **Reporting.** README lists the consent (*Partial blocks* = `allowed`) and a non-blocking
+  *Warnings* section with one line per partial sample (`present/size coordinates`); the
+  Alignment sheet carries a *coverage* column per dataset; the Overall Summary comparison-groups
+  block states `complete` or `partial: k of n samples, min p/size` per dataset.
+* **Maps.** Every map still covers the whole grid: a dataset map paints absent coordinates
+  `(no data)` (white), appends `(present/size coordinates)` to its title and computes legend
+  shares over the coordinates present; agreement and co-occurrence maps show the coordinate as
+  `Missing`. The workbook verifier's solid-fill contract is unchanged.
+* **Grid.** Each dataset's grid must still equal the primary dataset's; a smaller array is a
+  partial block inside that grid (a 20 × 24 array inside 26 × 38), not a different grid.
+
 ### Sample blocks, repeated Names and missing verdicts (v0.5.1)
 
 Within one worksheet a Name is split into *occurrences*: a coordinate that repeats starts a new

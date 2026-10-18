@@ -161,6 +161,14 @@ class DatasetSpec:
     title: str = ""
     samples: Mapping[str, str] = field(default_factory=dict)
     """Chosen sample blocks (candidate key -> title); empty = strict one-per-Name contract."""
+    allow_partial: bool = False
+    """Let a chosen block that covers only part of the grid stand as a partial sample.
+
+    Off by default: the historical contract is a complete ``rows x nodes`` array per
+    sample.  When on, the missing coordinates of such a sample have no value, are
+    drawn as 'no data' on the maps, and are counted as *unpaired* in every
+    comparison instead of being scored.
+    """
 
     @property
     def grid(self) -> Grid:
@@ -203,6 +211,8 @@ class DatasetSpec:
             data["title"] = self.title
         if self.samples:
             data["samples"] = dict(self.samples)
+        if self.allow_partial:
+            data["allow_partial"] = True
         return data
 
     @classmethod
@@ -222,6 +232,7 @@ class DatasetSpec:
             data.get("model_column") or None,
             str(data.get("title") or ""),
             {str(k): str(v) for k, v in (data.get("samples") or {}).items()},
+            bool(data.get("allow_partial", False)),
         )
 
 
@@ -496,6 +507,7 @@ def load_datasets(profile: ReportProfile) -> dict[str, ParsedDataset]:
             grid=spec.grid,
             model_column=spec.model_column,
             samples=spec.samples or None,
+            allow_partial=spec.allow_partial,
         )
         for spec in profile.datasets
     }
@@ -678,6 +690,8 @@ class ReferenceStats:
     raw_table: assoc.ContingencyTable
     excluded: int
     pairs: int
+    unpaired: int = 0
+    """Coordinates with a record on only one side (partial blocks); never scored."""
 
 
 @dataclass(frozen=True)
@@ -690,6 +704,8 @@ class AssociationStats:
     agreement: assoc.Agreement | None
     excluded: int
     pairs: int
+    unpaired: int = 0
+    """Coordinates with a record on only one side (partial blocks); never scored."""
 
 
 @dataclass(frozen=True)
@@ -714,6 +730,8 @@ class ProfileResult:
     unregistered: Mapping[str, tuple[str, ...]]
     sources: Mapping[str, tuple[SourceMetadata, ...]]
     label_orders: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    warnings: tuple[str, ...] = ()
+    """Non-blocking conditions the reader must know about (partial sample coverage)."""
 
     def labels(self, dataset_id: str) -> tuple[str, ...]:
         """Raw labels of a dataset in scheme order (registered) or first-seen order."""
@@ -761,15 +779,23 @@ def _label_order(
 
 def _pairs_for(
     spec: ComparisonSpec, records: Iterable[MultiRecord]
-) -> tuple[list[tuple[str, str]], int, set[str], set[str]]:
+) -> tuple[list[tuple[str, str]], int, set[str], set[str], int]:
+    """``(pairs, excluded, unmapped_a, unmapped_b, unpaired)`` for one sample.
+
+    ``unpaired`` counts coordinates that one side has and the other lacks (a partial
+    block on either side); they are reported, never scored.
+    """
     pairs: list[tuple[str, str]] = []
     excluded = 0
+    unpaired = 0
     unmapped_a: set[str] = set()
     unmapped_b: set[str] = set()
     for record in records:
         raw_a = record.value(spec.a)
         raw_b = record.value(spec.b)
         if raw_a is None or raw_b is None:
+            if raw_a is not None or raw_b is not None:
+                unpaired += 1
             continue
         cat_a, drop_a = _map_value(raw_a, spec.mapping_a, spec.exclude_a)
         cat_b, drop_b = _map_value(raw_b, spec.mapping_b, spec.exclude_b)
@@ -790,11 +816,15 @@ def _pairs_for(
         if cat_a is None or cat_b is None:
             continue
         pairs.append((cat_a, cat_b))
-    return pairs, excluded, unmapped_a, unmapped_b
+    return pairs, excluded, unmapped_a, unmapped_b, unpaired
 
 
 def _reference_stats(
-    spec: ComparisonSpec, pairs: Sequence[tuple[str, str]], excluded: int, raw_pairs
+    spec: ComparisonSpec,
+    pairs: Sequence[tuple[str, str]],
+    excluded: int,
+    raw_pairs,
+    unpaired: int = 0,
 ) -> ReferenceStats:
     categories = spec.categories
     metrics = _metrics(categories, pairs, strict_macro=spec.strict_macro)
@@ -805,6 +835,7 @@ def _reference_stats(
         assoc.contingency(raw_pairs),
         excluded,
         len(pairs),
+        unpaired,
     )
 
 
@@ -814,6 +845,7 @@ def _association_stats(
     excluded: int,
     labels_a: Sequence[str],
     labels_b: Sequence[str],
+    unpaired: int = 0,
 ) -> AssociationStats:
     table = assoc.contingency(pairs, labels_a, labels_b)
     cells = [assoc.collapse(table, cell.labels_a, cell.labels_b, cell.name) for cell in spec.cells]
@@ -829,6 +861,7 @@ def _association_stats(
         assoc.agreement(table, spec.positive) if shared else None,
         excluded,
         len(pairs),
+        unpaired,
     )
 
 
@@ -859,12 +892,13 @@ def evaluate_comparison(
     all_pairs: list[tuple[str, str]] = []
     all_raw: list[tuple[str, str]] = []
     total_excluded = 0
+    total_unpaired = 0
     unmapped_a: set[str] = set()
     unmapped_b: set[str] = set()
     for sample in samples:
         if spec.a not in sample.members or spec.b not in sample.members:
             continue
-        pairs, excluded, missing_a, missing_b = _pairs_for(spec, sample.records)
+        pairs, excluded, missing_a, missing_b, unpaired = _pairs_for(spec, sample.records)
         unmapped_a |= missing_a
         unmapped_b |= missing_b
         raw_pairs = [
@@ -875,20 +909,23 @@ def evaluate_comparison(
         all_pairs.extend(pairs)
         all_raw.extend(raw_pairs)
         total_excluded += excluded
+        total_unpaired += unpaired
         if unmapped_a or unmapped_b:
             continue
         per_sample[sample.sample] = (
-            _reference_stats(spec, pairs, excluded, raw_pairs)
+            _reference_stats(spec, pairs, excluded, raw_pairs, unpaired)
             if spec.kind == "reference"
-            else _association_stats(spec, pairs, excluded, labels_a, labels_b)
+            else _association_stats(spec, pairs, excluded, labels_a, labels_b, unpaired)
         )
     if unmapped_a or unmapped_b:
         overall = None
         per_sample = {}
     elif spec.kind == "reference":
-        overall = _reference_stats(spec, all_pairs, total_excluded, all_raw)
+        overall = _reference_stats(spec, all_pairs, total_excluded, all_raw, total_unpaired)
     else:
-        overall = _association_stats(spec, all_pairs, total_excluded, labels_a, labels_b)
+        overall = _association_stats(
+            spec, all_pairs, total_excluded, labels_a, labels_b, total_unpaired
+        )
     return ComparisonResult(
         spec,
         overall,
@@ -948,6 +985,31 @@ def unregistered_labels(
     return result
 
 
+def coverage(datasets: Mapping[str, ParsedDataset]) -> dict[str, dict[str, tuple[int, int]]]:
+    """``dataset id -> sample title -> (coordinates present, grid size)``."""
+    return {
+        dataset_id: {
+            sheet.title: (sheet.unique_coordinates, dataset.grid.size) for sheet in dataset.sheets
+        }
+        for dataset_id, dataset in datasets.items()
+    }
+
+
+def coverage_warnings(
+    profile: ReportProfile, datasets: Mapping[str, ParsedDataset]
+) -> tuple[str, ...]:
+    """One line per partial sample so the reader cannot miss reduced coverage."""
+    found: list[str] = []
+    for spec in profile.datasets:
+        for title, (present, size) in coverage({spec.id: datasets[spec.id]})[spec.id].items():
+            if present < size:
+                found.append(
+                    f"dataset {spec.id!r} sample {title!r}: {present}/{size} coordinates "
+                    "(partial block; comparisons score only coordinates present on both sides)"
+                )
+    return tuple(found)
+
+
 def evaluate_profile(
     profile: ReportProfile,
     datasets: Mapping[str, ParsedDataset] | None = None,
@@ -958,7 +1020,9 @@ def evaluate_profile(
 
     The result is ``blocked`` when a dataset carries labels outside its declared
     scheme, when a comparison meets a label its mapping does not cover, or when
-    no sample could be aligned.  Nothing is inferred silently.
+    no sample could be aligned.  Nothing is inferred silently.  Partial samples
+    (blocks admitted with ``allow_partial``) do not block; each is listed under
+    ``warnings`` and its missing coordinates are reported as *unpaired*.
     """
     datasets = dict(datasets) if datasets is not None else load_datasets(profile)
     errors: list[str] = []
@@ -1014,6 +1078,7 @@ def evaluate_profile(
             for dataset_id, dataset in datasets.items()
         },
         orders,
+        coverage_warnings(profile, datasets),
     )
 
 
