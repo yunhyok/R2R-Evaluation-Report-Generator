@@ -608,7 +608,8 @@ class WizardWindow(QMainWindow):
         layout = QVBoxLayout(page)
         intro = QLabel(
             "비교할 파일을 모두 추가합니다. 첫 번째 행이 기준(primary) 데이터셋이며 샘플 정렬의 "
-            "축이 됩니다. 측정 CSV/XLSX, R2R-Machine-Learning 예측, ImageMarker 라벨, "
+            "축이 됩니다. 측정 CSV/XLSX, R2R-Machine-Learning 예측(전기 라벨 학습 또는 "
+            "Good/Bad/Open 육안 라벨 학습 — prob_ 열로 비교군을 자동 제안), ImageMarker 라벨, "
             "Printed-Device-AI-Inspector 내보내기(image_path)를 지원합니다."
         )
         intro.setWordWrap(True)
@@ -651,8 +652,9 @@ class WizardWindow(QMainWindow):
         layout = QVBoxLayout(page)
         intro = QLabel(
             "각 데이터셋의 라벨 체계를 확인합니다. 체계 밖 라벨이 있으면 체계를 바꾸거나 "
-            "'(미등록)'을 선택해 원본 라벨 그대로 진행합니다. 체계는 label_schemes.json에서 "
-            "관리합니다."
+            "'(미등록)'을 선택해 원본 라벨 그대로 진행합니다. 등록된 라벨은 대소문자·공백을 "
+            "무시해 체계의 철자로 표기·비교됩니다(예: ML 예측의 Good → GOOD). 체계는 "
+            "label_schemes.json에서 관리합니다."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -840,10 +842,12 @@ class WizardWindow(QMainWindow):
         self.dataset_table.insertRow(row)
         if info.is_inspector and not model_column and info.inspector_models:
             model_column = info.inspector_models[0]
-        # Inspector exports say which provider produced each column, so the
-        # comparison group (cloud VLM vs Local LLM) is pre-selected from it.
+        # Inspector exports say which provider produced each column (cloud VLM vs
+        # Local LLM) and R2R-Machine-Learning exports say which classes the model
+        # was trained on (prob_<class>: electrical vs Good/Bad/Open visual labels),
+        # so the comparison group is pre-selected from them.
         if role == "other":
-            role = suggest_role(info.is_inspector, model_column) or role
+            role = suggest_role(info.is_inspector, model_column, info.prediction_classes) or role
         default_title = backend.default_title(path, model_column if info.is_inspector else None)
         title_item = _item(title or default_title, editable=True)
         title_item.setData(Qt.UserRole, dataset_id)

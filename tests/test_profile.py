@@ -770,3 +770,144 @@ def test_primary_samples_without_partner_keep_their_maps(tmp_path: Path) -> None
         ("s1", {"a": "s1", "b": "s1"}),
         ("s2", {"a": "s2"}),
     ]
+
+
+# ------------------------------------------------ visual-label ML predictions (v0.7.0)
+
+VISUAL_ML_PROBABILITIES = {
+    "Good": (0.9, 0.05, 0.05),
+    "Bad": (0.05, 0.9, 0.05),
+    "Open": (0.05, 0.05, 0.9),
+}
+
+
+def _visual_ml_csv(path: Path, name: str, verdicts) -> Path:
+    """R2R-Machine-Learning ``visual_3class`` export: lower-case verdicts, prob_Good/Bad/Open."""
+    rows = []
+    for index, (row, node) in enumerate(GRID):
+        verdict = verdicts(index)
+        rows.append(
+            {
+                "image_path": f"C:/slices/{name}_rgb_{row}_{node}.png",
+                "name": name,
+                "row": row,
+                "node": node,
+                "sha256": "abc",
+                "prediction": verdict,
+                "confidence": 0.9,
+                "review_required": "false",
+                "prob_Good": VISUAL_ML_PROBABILITIES[verdict][0],
+                "prob_Bad": VISUAL_ML_PROBABILITIES[verdict][1],
+                "prob_Open": VISUAL_ML_PROBABILITIES[verdict][2],
+            }
+        )
+    return _csv(path, rows)
+
+
+def test_ml_role_is_suggested_from_probability_columns() -> None:
+    assert profile.ml_role_for_classes(("Good", "Bad", "Open")) == "optical_ml"
+    assert profile.ml_role_for_classes(("good", "BAD", " open ")) == "optical_ml"
+    assert profile.ml_role_for_classes(("Normal", "Open", "Short")) == "electrical_ml"
+    assert profile.ml_role_for_classes(E5) == "electrical_ml"
+    assert profile.ml_role_for_classes(("Alpha", "Beta")) is None  # custom scheme: operator decides
+    assert profile.ml_role_for_classes(()) is None
+    assert profile.suggest_role(False, None, ("Good", "Bad", "Open")) == "optical_ml"
+    assert profile.suggest_role(False, None) is None
+    # An Inspector column keeps its provider-based suggestion whatever else is passed.
+    assert profile.suggest_role(True, "lmstudio:x", ("Good", "Bad", "Open")) == "optical_vlm_local"
+    assert profile.role_title("optical_ml").startswith("광학 ML 예측")
+    assert "optical_ml" in profile.ROLES and set(profile.ROLES) == set(profile.ROLE_TITLES)
+
+
+def test_visual_label_ml_predictions_join_the_optical_vocabulary(tmp_path: Path) -> None:
+    """Human GOOD/BAD/OPEN against an ML model's Good/Bad/Open is one three-class comparison."""
+    registry = schemes.load_registry(user_path="/none")
+
+    def ml_verdict(index: int) -> str:
+        return ("Good", "Bad", "Open")[(index + (index % 11 == 0)) % 3]
+
+    human = _grid_csv(tmp_path / "human.csv", "s1", "label", lambda i, _r, _n: OPTICAL[i % 3])
+    ml = _visual_ml_csv(tmp_path / "ml.csv", "s1", ml_verdict)
+    datasets_spec = (
+        profile.DatasetSpec("h", str(human), "optical_human", "optical_3", title="Human"),
+        profile.DatasetSpec("m", str(ml), "optical_ml", "optical_3", title="Visual ML"),
+    )
+    base = profile.ReportProfile(datasets_spec)
+    datasets = profile.load_datasets(base)
+    assert set(datasets["m"].raw_labels) == {"Good", "Bad", "Open"}  # first-seen order
+    assert registry.identify(datasets["m"].raw_labels) == ("optical_3",)
+    orders = profile.label_orders(base, datasets, registry)
+    assert orders == {"h": OPTICAL, "m": OPTICAL}  # scheme spelling, not the file's
+
+    identity = {label: label for label in orders["m"]}
+    reference = profile.ComparisonSpec(
+        "ref", "reference", "h", "m", mapping_a=identity, mapping_b=identity
+    )
+    result = profile.evaluate_profile(
+        profile.ReportProfile(datasets_spec, (reference,)), datasets, registry=registry
+    )
+    assert not result.blocked, result.errors
+    comparison = result.comparisons[0]
+    assert comparison.spec.categories == OPTICAL
+    assert comparison.labels_a == comparison.labels_b == OPTICAL
+    joined = result.samples[0].records
+    assert joined[0].value("m") == "BAD" and joined[3].value("m") == "GOOD"  # scheme spelling
+    assert {record.value("m") for record in joined} == set(OPTICAL)
+    errors = sum(1 for index in range(988) if index % 11 == 0)
+    assert comparison.overall.metrics.accuracy == pytest.approx((988 - errors) / 988)
+    assert comparison.overall.pairs == 988
+
+    # Mixed spellings inside one comparison (hand-written or pre-0.7 profile) are one
+    # category set instead of a silent six-category matrix with accuracy 0.
+    mixed = profile.ComparisonSpec(
+        "mixed",
+        "reference",
+        "h",
+        "m",
+        mapping_a={label: label for label in OPTICAL},
+        mapping_b={"Good": "Good", "Bad": "Bad", "Open": "Open"},
+        positive="good",
+    )
+    assert mixed.categories == OPTICAL
+    assert mixed.mapping_b == {"Good": "GOOD", "Bad": "BAD", "Open": "OPEN"}
+    assert mixed.positive == "GOOD"
+    assert mixed.to_dict()["categories"] == list(OPTICAL)
+    excluded = profile.ComparisonSpec(
+        "excl", "reference", "h", "m", mapping_a={"GOOD": "Pass", "*": schemes.EXCLUDE}
+    )
+    assert excluded.mapping_a["*"] == schemes.EXCLUDE and excluded.categories == ("Pass",)
+
+    # The optical_3 presets apply to the ML side unchanged.
+    assert registry.preset("optical_to_binary").resolved_rules(orders["m"]) == {
+        "GOOD": "Pass",
+        "BAD": "Fail",
+        "OPEN": "Fail",
+    }
+
+    # Workbook: Label_Audit reports the scheme spelling next to the file's spelling,
+    # with counts intact, and the summary names the visual-label ML group.
+    from openpyxl import load_workbook
+
+    from r2r_evaluation_report.workbook import generate_workbook
+
+    output = tmp_path / "visual.xlsx"
+    generate_workbook(output, result)
+    wb = load_workbook(output)
+    audit = [[cell.value for cell in row] for row in wb["Label_Audit"].iter_rows(min_row=3)]
+    header = audit[0]
+    ml_rows = [row for row in audit[1:] if row[0] == "Visual ML"]
+    assert [row[header.index("Label")] for row in ml_rows] == list(OPTICAL)
+    good = next(row for row in ml_rows if row[header.index("Label")] == "GOOD")
+    assert good[header.index("Observed spellings")] == "Good"
+    assert good[header.index("In scheme")] == "yes"
+    assert good[header.index("Count")] == sum(1 for i in range(988) if ml_verdict(i) == "Good")
+    assert sum(row[header.index("Count")] for row in ml_rows) == 988
+    summary = [[cell.value for cell in row] for row in wb["Overall Summary"].iter_rows()]
+    assert any(
+        isinstance(row[0], str) and row[0].startswith("Visual-label ML group:") for row in summary
+    )
+    groups = [row for row in summary if row and row[0] == profile.role_title("optical_ml")]
+    assert groups and groups[0][1] == "Visual ML" and groups[0][4] == "optical_3"
+    distribution = [row for row in summary if row and row[0] == "Visual ML"]
+    assert [row[1] for row in distribution] == list(OPTICAL)
+    assert sum(row[2] for row in distribution) == 988

@@ -130,6 +130,36 @@ _OPTIONAL_HEADERS = {
     "provenance": ("provenance", "origin", "traceability"),
     "source": ("source", "source file", "input source"),
 }
+_PROB_PREFIX = "prob_"
+_PROB_HEADER = re.compile(r"^prob[\s_]+(?P<class>.+)$", re.I)
+_LEGACY_PROB_CLASSES = frozenset({"normal", "open", "short"})
+
+
+def probability_columns(headers: Iterable[object]) -> dict[str, str]:
+    """``class name -> header`` for every ``prob_<class>`` column, in header order.
+
+    R2R-Machine-Learning writes one such column per trained class, so the set of
+    class names identifies the label scheme the model was trained on
+    (``prob_Normal/prob_Open/prob_Short`` for the electrical schemes,
+    ``prob_Good/prob_Bad/prob_Open`` for the visual-inspection scheme) even when
+    the ``prediction`` column happens to use only some of the classes.
+    """
+    found: dict[str, str] = {}
+    for header in headers:
+        if header is None:
+            continue
+        text = str(header).strip()
+        match = _PROB_HEADER.match(text)
+        if match:
+            found.setdefault(match.group("class").strip(), text)
+    return found
+
+
+def prediction_classes(headers: Iterable[object]) -> tuple[str, ...]:
+    """Class names of an R2R-Machine-Learning export's ``prob_<class>`` columns (may be empty)."""
+    return tuple(probability_columns(headers))
+
+
 _DEFAULT_STATUS_RULES = {
     "pass": "Normal",
     "noactive": "Normal",
@@ -190,6 +220,13 @@ class R2RRecord:
     input_row: int | None = None
     occurrence: int = 0
     """0-based repeat index when the same Name re-uses coordinates within one worksheet."""
+    class_probabilities: tuple[tuple[str, float], ...] | None = None
+    """``(class, probability)`` per ``prob_<class>`` column of the source, in column order.
+
+    Set for every export that carries probability columns; the ``prob_normal`` /
+    ``prob_open`` / ``prob_short`` fields above are filled only when those columns
+    are exactly the Normal / Open / Short trio of the electrical ML schemes.
+    """
 
     @property
     def coordinate(self) -> Coordinate:
@@ -497,6 +534,19 @@ def _header_map(headers: Iterable[object], kind: DatasetKind) -> dict[str, str] 
         )
         if found:
             result[field_name] = found
+    # Probability columns are kept per class in header order, whatever class set the
+    # export carries (prob_Normal/prob_Open/prob_Short for an electrical model,
+    # prob_Good/prob_Bad/prob_Open for the visual-label model).  Alias spellings of the
+    # historical trio ("normal probability", "p open") stay recognised.
+    probability: dict[str, str] = {
+        f"{_PROB_PREFIX}{class_name}": header
+        for class_name, header in probability_columns(original).items()
+    }
+    for key in ("prob_Normal", "prob_Open", "prob_Short"):
+        header = result.pop(key, None)
+        if header is not None and header not in probability.values():
+            probability[key] = header
+    result.update(probability)
     return result
 
 
@@ -715,6 +765,38 @@ def _as_text(value: Any) -> str | None:
     return value or None
 
 
+def _class_probabilities(
+    source_row: Mapping[str, Any],
+    header_map: Mapping[str, str],
+    prob_fields: Sequence[str],
+    context: str,
+) -> tuple[tuple[str, float], ...] | None:
+    """Read every ``prob_<class>`` cell of one row; ``None`` when the row carries none.
+
+    Whatever class set the export carries, the probabilities must be supplied
+    together, lie in ``[0, 1]`` and (for two or more classes) sum to 1 within 1e-5 —
+    the same contract the Normal/Open/Short trio always had.
+    """
+    if not prob_fields:
+        return None
+    values = [
+        (
+            field[len(_PROB_PREFIX) :],
+            _optional_float(source_row.get(header_map[field]), field, context),
+        )
+        for field in prob_fields
+    ]
+    if all(value is None for _name, value in values):
+        return None
+    if any(value is None for _name, value in values):
+        raise DataContractError(f"{context}: {', '.join(prob_fields)} must be supplied together")
+    if any(not 0 <= value <= 1 for _name, value in values):
+        raise DataContractError(f"{context}: probabilities must be in [0, 1]")
+    if len(values) >= 2 and abs(sum(value for _name, value in values) - 1.0) > 1e-5:
+        raise DataContractError(f"{context}: probabilities must sum to 1 within 1e-5")
+    return tuple((name, float(value)) for name, value in values)  # type: ignore[arg-type]
+
+
 def _parse_rows(
     rows: Iterable[tuple[int, Mapping[str, Any]]],
     header_map: Mapping[str, str],
@@ -735,6 +817,10 @@ def _parse_rows(
     occurrence_by_name: dict[str, int] = defaultdict(int)
     value_field = _VALUE_FIELD[kind]
     value_name = {"status": "Status", "prediction": "prediction", "label": "label"}[value_field]
+    prob_fields = tuple(field for field in header_map if field.startswith(_PROB_PREFIX))
+    legacy_trio = {
+        _normalise(field[len(_PROB_PREFIX) :]) for field in prob_fields
+    } == _LEGACY_PROB_CLASSES
     for row_number, source_row in rows:
         # Completely blank tail rows are not records; partially blank rows remain errors.
         if not any(value is not None and str(value).strip() for value in source_row.values()):
@@ -768,21 +854,11 @@ def _parse_rows(
         )
         if confidence is not None and not 0 <= confidence <= 1:
             raise DataContractError(f"{context}: confidence must be in [0, 1]")
-        probabilities = tuple(
-            _optional_float(source_row.get(header_map.get(field_name)), field_name, context)
-            if field_name in header_map
-            else None
-            for field_name in ("prob_Normal", "prob_Open", "prob_Short")
-        )
-        if any(item is not None for item in probabilities):
-            if any(item is None for item in probabilities):
-                raise DataContractError(
-                    f"{context}: prob_Normal, prob_Open, and prob_Short must be supplied together"
-                )
-            if any(not 0 <= item <= 1 for item in probabilities if item is not None):
-                raise DataContractError(f"{context}: probabilities must be in [0, 1]")
-            if abs(sum(item for item in probabilities if item is not None) - 1.0) > 1e-5:
-                raise DataContractError(f"{context}: probabilities must sum to 1 within 1e-5")
+        class_probabilities = _class_probabilities(source_row, header_map, prob_fields, context)
+        probabilities: tuple[float | None, float | None, float | None] = (None, None, None)
+        if class_probabilities is not None and legacy_trio:
+            by_class = {_normalise(name): value for name, value in class_probabilities}
+            probabilities = (by_class["normal"], by_class["open"], by_class["short"])
         records.append(
             R2RRecord(
                 name,
@@ -800,6 +876,7 @@ def _parse_rows(
                 _as_text(source_row.get(header_map["source"])) if "source" in header_map else None,
                 row_number,
                 occurrence_by_name[normalised_name],
+                class_probabilities,
             )
         )
     if not seen_by_name:

@@ -365,3 +365,97 @@ def test_synthetic_evaluation_is_deterministic_and_contract_complete() -> None:
     assert first.overall_three_class == second.overall_three_class
     assert first.overall_three_class.total < 988  # No Gate Effect remains audited as an exclusion.
     assert first.sheet_evaluations[0].confidence_review.probability_count == 988
+
+
+def _visual_ml_rows(name: str = "s1") -> list[dict[str, object]]:
+    """R2R-Machine-Learning 0.6 ``visual_3class`` predictions.csv rows (prob_Good/Bad/Open)."""
+    probabilities = {
+        "Good": (0.9, 0.05, 0.05),
+        "Bad": (0.05, 0.9, 0.05),
+        "Open": (0.05, 0.05, 0.9),
+    }
+    rows: list[dict[str, object]] = []
+    for index, (row, node) in enumerate((r, n) for r in range(1, 27) for n in range(1, 39)):
+        verdict = ("Good", "Bad", "Open")[index % 3]
+        rows.append(
+            {
+                "image_path": f"C:/slices/{name}_rgb_{row}_{node}.png",
+                "name": name,
+                "row": row,
+                "node": node,
+                "sha256": "abc",
+                "run_date": "2026-10-17",
+                "source_id": "slices",
+                "prediction": verdict,
+                "confidence": "0.9",
+                "review_required": "false",
+                "prob_Good": probabilities[verdict][0],
+                "prob_Bad": probabilities[verdict][1],
+                "prob_Open": probabilities[verdict][2],
+            }
+        )
+    return rows
+
+
+def test_visual_label_prediction_export_parses_with_its_own_probability_columns(
+    tmp_path: Path,
+) -> None:
+    """A Good / Bad / Open export carries prob_Good/prob_Bad/prob_Open, not the legacy trio.
+
+    Before 0.7.0 the ``prob_Open`` header matched the legacy alias and the parser
+    demanded ``prob_Normal`` and ``prob_Short`` as well, so the file could not be read.
+    """
+    rows = _visual_ml_rows()
+    source = tmp_path / "predictions.csv"
+    _csv(source, rows)
+    assert core.prediction_classes(list(rows[0])) == ("Good", "Bad", "Open")
+    assert core.prediction_classes(["name", "row", "node", "prediction", "confidence"]) == ()
+    assert core.prediction_classes(["prob_Normal", "prob open", "Prob_Short"]) == (
+        "Normal",
+        "open",
+        "Short",
+    )
+    dataset = core.parse_dataset(source, "label")  # the wizard reads every file as 'label'
+    record = dataset.sheets[0].records[1]
+    assert record.value == "Bad" and record.confidence == 0.9 and record.review_required is False
+    assert record.class_probabilities == (("Good", 0.05), ("Bad", 0.9), ("Open", 0.05))
+    assert (record.prob_normal, record.prob_open, record.prob_short) == (None, None, None)
+    assert dataset.raw_labels == ("Good", "Bad", "Open")
+    legacy = core.parse_dataset(source, "prediction").sheets[0].records[0]
+    assert legacy.class_probabilities == (("Good", 0.9), ("Bad", 0.05), ("Open", 0.05))
+
+    missing = [dict(row) for row in rows]
+    missing[5]["prob_Bad"] = ""
+    _csv(tmp_path / "missing.csv", missing)
+    with pytest.raises(core.DataContractError, match="must be supplied together"):
+        core.parse_dataset(tmp_path / "missing.csv", "label")
+    skewed = [dict(row) for row in rows]
+    skewed[5]["prob_Bad"] = "0.5"
+    _csv(tmp_path / "sum.csv", skewed)
+    with pytest.raises(core.DataContractError, match="sum to 1"):
+        core.parse_dataset(tmp_path / "sum.csv", "label")
+    out_of_range = [dict(row) for row in rows]
+    out_of_range[5].update({"prob_Good": "1.2", "prob_Bad": "-0.1", "prob_Open": "-0.1"})
+    _csv(tmp_path / "range.csv", out_of_range)
+    with pytest.raises(core.DataContractError, match=r"in \[0, 1\]"):
+        core.parse_dataset(tmp_path / "range.csv", "label")
+
+
+def test_electrical_probability_trio_still_fills_the_dedicated_fields(tmp_path: Path) -> None:
+    rows = _grid_rows("prediction", lambda _r, _n: "Open")
+    for row in rows:
+        row.update({"prob_Normal": "0.1", "prob_Open": "0.8", "prob_Short": "0.1"})
+    source = tmp_path / "electrical.csv"
+    _csv(source, rows)
+    record = core.parse_dataset(source, "prediction").sheets[0].records[0]
+    assert (record.prob_normal, record.prob_open, record.prob_short) == (0.1, 0.8, 0.1)
+    assert record.class_probabilities == (("Normal", 0.1), ("Open", 0.8), ("Short", 0.1))
+    partial = _grid_rows("prediction", lambda _r, _n: "Open")
+    for row in partial:
+        row.update({"prob_Normal": "0.2", "prob_Open": "0.8"})
+    _csv(tmp_path / "partial.csv", partial)
+    dataset = core.parse_dataset(tmp_path / "partial.csv", "prediction")
+    # Two columns that are not the trio: validated together, kept per class, legacy fields empty.
+    record = dataset.sheets[0].records[0]
+    assert record.class_probabilities == (("Normal", 0.2), ("Open", 0.8))
+    assert record.prob_normal is None and record.prob_open is None

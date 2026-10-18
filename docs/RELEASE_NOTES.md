@@ -1,3 +1,24 @@
+# v0.7.0
+
+- Good / Bad / Open prediction sets from R2R-Machine-Learning 0.6.0 (`visual_3class`) now load:
+  `prob_<class>` probability columns are read for any class set with the same contract (supplied
+  together, in [0, 1], summing to 1 within 1e-5). Until now the `prob_Open` header matched the
+  electrical alias and the parser demanded `prob_Normal`/`prob_Short` too, rejecting the file.
+  `R2RRecord.class_probabilities` keeps the per-class values; the legacy trio fields are filled only
+  for Normal/Open/Short exports.
+- New comparison group `optical_ml` ("광학 ML 예측 (Good/Bad/Open 육안 라벨 학습)"): an ML model
+  trained on visual-inspection labels. Its predictions share the `optical_3` vocabulary, so human or
+  VLM labels are its reference (reference comparison) and electrical status an association. The
+  wizard pre-selects the group from the `prob_<class>` columns of an R2R-Machine-Learning export
+  (Good/Bad/Open → `optical_ml`; Normal/Open/Short or E-5 → `electrical_ml`; custom → no suggestion).
+- Labels of a dataset with a declared scheme are reported and compared in the scheme's spelling
+  (`Good` → `GOOD`); category targets inside one comparison that differ only in case collapse to one
+  category (first declared spelling wins). Before, human `GOOD` vs ML `Good` under identity mappings
+  silently produced a six-category matrix with accuracy 0. `Label_Audit` gains an *Observed
+  spellings* column.
+- Overall Summary names the visual-label ML group; the self-test adds a Good/Bad/Open prediction
+  dataset with a binary reference comparison and a raw-status association.
+
 # v0.6.0
 
 - New comparison group `optical_vlm_local` ("Local LLM"): Inspector model columns from a local

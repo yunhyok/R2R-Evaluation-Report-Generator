@@ -21,6 +21,7 @@ from .core import (
     discover_worksheets,
     inspect_samples,
     inspector_model_columns,
+    prediction_classes,
     selection_needed,
 )
 from .profile import (
@@ -45,10 +46,21 @@ class SourceInfo:
     path: str
     worksheets: tuple[str, ...]
     inspector_models: tuple[str, ...]
+    prediction_classes: tuple[str, ...] = ()
+    """Classes named by the ``prob_<class>`` columns of an R2R-Machine-Learning export.
+
+    ``("Normal", "Open", "Short")`` or the E-5 labels for a model trained on
+    electrical status, ``("Good", "Bad", "Open")`` for one trained on
+    visual-inspection labels; empty for every other source.
+    """
 
     @property
     def is_inspector(self) -> bool:
         return bool(self.inspector_models)
+
+    @property
+    def is_ml_prediction(self) -> bool:
+        return bool(self.prediction_classes)
 
 
 def _long_format_models(headers: Sequence[str], rows) -> list[str]:
@@ -70,7 +82,9 @@ def inspect_source(path: str | Path) -> SourceInfo:
 
     Matrix-style exports name the models in their headers; long-format exports
     (``verdict`` column) are scanned for distinct ``provider:model_id`` pairs, so
-    the wizard always offers concrete choices.
+    the wizard always offers concrete choices.  R2R-Machine-Learning exports are
+    recognised by their ``prob_<class>`` columns, whose class names say which
+    label scheme the model was trained on.
     """
     source = Path(path)
     if source.suffix.casefold() == ".csv":
@@ -78,10 +92,11 @@ def inspect_source(path: str | Path) -> SourceInfo:
         models = list(inspector_model_columns(headers))
         if models == ["verdict"]:
             models = _long_format_models(headers, rows)
-        return SourceInfo(str(source), ("CSV",), tuple(models))
+        return SourceInfo(str(source), ("CSV",), tuple(models), prediction_classes(headers))
     infos = discover_worksheets(source, "label")
     models: list[str] = []
     long_sheets: list[str] = []
+    classes: tuple[str, ...] = ()
     for info in infos:
         columns = inspector_model_columns(info.headers)
         if columns == ("verdict",):
@@ -90,6 +105,8 @@ def inspect_source(path: str | Path) -> SourceInfo:
         for model in columns:
             if model not in models:
                 models.append(model)
+        if not classes:
+            classes = prediction_classes(info.headers)
     if not models and long_sheets:
         from openpyxl import load_workbook
 
@@ -102,7 +119,7 @@ def inspect_source(path: str | Path) -> SourceInfo:
             models = _long_format_models(headers, rows)
         finally:
             workbook.close()
-    return SourceInfo(str(source), tuple(info.title for info in infos), tuple(models))
+    return SourceInfo(str(source), tuple(info.title for info in infos), tuple(models), classes)
 
 
 def default_title(path: str | Path, model_column: str | None = None) -> str:

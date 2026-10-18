@@ -25,12 +25,76 @@ def _write_synthetic(output: Path) -> None:
     verify_workbook(output)
 
 
+_VISUAL_PROBABILITIES = {
+    "Good": (0.9, 0.05, 0.05),
+    "Bad": (0.05, 0.9, 0.05),
+    "Open": (0.05, 0.05, 0.9),
+}
+
+
+def _write_synthetic_visual_predictions(path: Path, joined) -> None:
+    """R2R-Machine-Learning ``visual_3class`` export derived from the synthetic statuses.
+
+    Same column layout as the real tool (``prob_Good / prob_Bad / prob_Open``), a
+    controlled error pattern, and lower-case ``Good / Bad / Open`` spellings so the
+    self-test exercises the case-insensitive match against the ``optical_3`` scheme.
+    """
+    import csv
+
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "name",
+                "row",
+                "node",
+                "prediction",
+                "confidence",
+                "review_required",
+                "prob_Good",
+                "prob_Bad",
+                "prob_Open",
+            ]
+        )
+        for index, row in enumerate(joined):
+            record = row.measurement
+            status = record.value.casefold()
+            verdict = "Good" if status == "pass" else "Open" if status == "open" else "Bad"
+            if index % 19 == 0:
+                verdict = "Bad" if verdict == "Good" else "Good"
+            probabilities = _VISUAL_PROBABILITIES[verdict]
+            writer.writerow(
+                [
+                    record.name,
+                    record.row,
+                    record.node,
+                    verdict,
+                    "0.9",
+                    str(index % 23 == 0).lower(),
+                    *probabilities,
+                ]
+            )
+
+
 def _write_synthetic_profile(directory: Path) -> Path:
-    """Round-trip the synthetic evaluation through the profile path (schemes + scipy)."""
+    """Round-trip the synthetic evaluation through the profile path (schemes + scipy).
+
+    Besides the legacy measurement / electrical-prediction pair, the profile carries
+    a visual-label ML prediction set (comparison group ``optical_ml``) so that the
+    packaged self-test covers the Good / Bad / Open path end to end.
+    """
     import csv
 
     from .core import build_synthetic_evaluation
-    from .profile import CellSpec, ComparisonSpec, ReportProfile, evaluate_profile, legacy_profile
+    from .profile import (
+        CellSpec,
+        ComparisonSpec,
+        DatasetSpec,
+        ReportProfile,
+        evaluate_profile,
+        legacy_profile,
+    )
+    from .schemes import load_registry
     from .workbook import generate_workbook_pair, verify_workbook
 
     evaluation = build_synthetic_evaluation()
@@ -45,9 +109,23 @@ def _write_synthetic_profile(directory: Path) -> Path:
                 record = getattr(row, kind)
                 writer.writerow([record.name, record.row, record.node, record.value])
         paths[kind] = path
-    base = legacy_profile(str(paths["measurement"]), str(paths["prediction"]))
+    visual_path = directory / "synthetic-visual-ml.csv"
+    _write_synthetic_visual_predictions(visual_path, sheet.joined)
+    registry = load_registry()
+    base = legacy_profile(str(paths["measurement"]), str(paths["prediction"]), registry=registry)
+    legacy = registry.scheme("legacy_electrical").labels
+    optical = registry.scheme("optical_3").labels
     profile = ReportProfile(
-        base.datasets,
+        (
+            *base.datasets,
+            DatasetSpec(
+                "visual_ml",
+                str(visual_path),
+                "optical_ml",
+                "optical_3",
+                title="Visual ML (Good/Bad/Open)",
+            ),
+        ),
         (
             *base.comparisons,
             ComparisonSpec(
@@ -58,10 +136,32 @@ def _write_synthetic_profile(directory: Path) -> Path:
                 "Raw status vs prediction (association)",
                 cells=(CellSpec("None x Open", ("None",), ("Open",)),),
             ),
+            ComparisonSpec(
+                "visual_binary",
+                "reference",
+                "measurement",
+                "visual_ml",
+                "Operational binary vs visual-label ML (Pass / Fail)",
+                registry.preset("legacy_to_binary").resolved_rules(legacy),
+                registry.preset("optical_to_binary").resolved_rules(optical),
+                ("Pass", "Fail"),
+                positive="Fail",
+                strict_macro=False,
+                preset_a="legacy_to_binary",
+                preset_b="optical_to_binary",
+            ),
+            ComparisonSpec(
+                "visual_association",
+                "association",
+                "measurement",
+                "visual_ml",
+                "Raw status vs visual-label ML (association)",
+                cells=(CellSpec("Short x BAD", ("Short",), ("BAD",)),),
+            ),
         ),
         options=base.options,
     )
-    result = evaluate_profile(profile)
+    result = evaluate_profile(profile, registry=registry)
     if result.blocked:
         raise RuntimeError("Synthetic profile evaluation is unexpectedly blocked.")
     output = directory / "synthetic-profile-report.xlsx"

@@ -47,6 +47,8 @@ ROLES: tuple[str, ...] = (
     "electrical_ml",
     "optical_human",
     "optical_vlm",
+    "optical_vlm_local",
+    "optical_ml",
     "other",
 )
 
@@ -59,10 +61,11 @@ class ProfileError(ValueError):
 
 ROLE_TITLES: dict[str, str] = {
     "electrical_gt": "전기 측정 (기준)",
-    "electrical_ml": "전기 ML 예측",
+    "electrical_ml": "전기 ML 예측 (전기 라벨 학습)",
     "optical_human": "광학 육안 라벨",
     "optical_vlm": "광학 VLM 라벨 (cloud API)",
     "optical_vlm_local": "광학 Local LLM 라벨 (LM Studio 등 로컬 서버)",
+    "optical_ml": "광학 ML 예측 (Good/Bad/Open 육안 라벨 학습)",
     "other": "기타",
 }
 """Comparison-group vocabulary of ``DatasetSpec.role`` (key -> Korean title).
@@ -73,11 +76,24 @@ with what.  ``optical_vlm_local`` is the Local LLM comparison group: verdicts a
 Printed-Device-AI-Inspector run obtained from a model served on the operator's
 own hardware (the Inspector's ``lmstudio`` provider), kept apart from cloud-API
 VLMs because the two differ in reproducibility, cost and data residency even
-when the prompt and label set are identical.
+when the prompt and label set are identical.  ``optical_ml`` is the
+visual-label ML group: an R2R-Machine-Learning model trained on the
+visual-inspection labels (``visual_3class``: Good / Bad / Open) instead of on
+electrical status, so its predictions share the ``optical_3`` vocabulary of the
+human and VLM labels and are judged against those (reference comparison), while
+electrical status is only an association for them.
 """
 
 LOCAL_LLM_PROVIDERS: frozenset[str] = frozenset({"lmstudio", "ollama", "llamacpp", "vllm", "local"})
 """Inspector provider ids that denote a locally served model (``provider:model_id``)."""
+
+VISUAL_ML_CLASSES: frozenset[str] = frozenset({"good", "bad", "open"})
+"""Normalised class set of the R2R-Machine-Learning ``visual_3class`` scheme."""
+
+ELECTRICAL_ML_CLASSES: frozenset[str] = frozenset(
+    {"normal", "open", "short", "enormal", "enoactive", "eopen", "eshort", "einvalid"}
+)
+"""Normalised classes of the electrical ML schemes (``legacy_3class``, ``electrical_e5``)."""
 
 
 def model_provider(model_column: str | None) -> str | None:
@@ -92,15 +108,37 @@ def is_local_llm_model(model_column: str | None) -> bool:
     return model_provider(model_column) in LOCAL_LLM_PROVIDERS
 
 
-def suggest_role(is_inspector: bool, model_column: str | None) -> str | None:
+def ml_role_for_classes(prediction_classes: Iterable[str]) -> str | None:
+    """Comparison group of an R2R-Machine-Learning export from its ``prob_<class>`` columns.
+
+    The class set is the scheme the model was trained on: Good / Bad / Open is the
+    visual-label model (``optical_ml``); Normal / Open / Short or the E-5 labels are
+    an electrical model (``electrical_ml``).  Any other (custom) class set gives no
+    suggestion, so the operator decides.
+    """
+    classes = {_normalise(name) for name in prediction_classes if str(name).strip()}
+    if not classes:
+        return None
+    if classes == VISUAL_ML_CLASSES:
+        return "optical_ml"
+    if classes <= ELECTRICAL_ML_CLASSES:
+        return "electrical_ml"
+    return None
+
+
+def suggest_role(
+    is_inspector: bool, model_column: str | None, prediction_classes: Iterable[str] = ()
+) -> str | None:
     """Role to pre-select for a dataset, or None when nothing can be inferred.
 
-    Only Inspector exports carry a provider, so only they get a suggestion:
-    a local provider is the Local LLM comparison group, anything else a cloud VLM.
+    Inspector exports carry a provider: a local provider is the Local LLM
+    comparison group, anything else a cloud VLM.  R2R-Machine-Learning exports
+    carry ``prob_<class>`` columns: see :func:`ml_role_for_classes`.  Every other
+    source gives no suggestion.
     """
-    if not is_inspector:
-        return None
-    return "optical_vlm_local" if is_local_llm_model(model_column) else "optical_vlm"
+    if is_inspector:
+        return "optical_vlm_local" if is_local_llm_model(model_column) else "optical_vlm"
+    return ml_role_for_classes(prediction_classes)
 
 
 def role_title(role: str) -> str:
@@ -230,6 +268,34 @@ class ComparisonSpec:
             raise ProfileError(f"comparison {self.id!r}: kind must be reference or association")
         if self.a == self.b:
             raise ProfileError(f"comparison {self.id!r}: sides must be different datasets")
+        # One spelling per category.  Targets that differ only in case or spacing
+        # (``Good`` written by the visual-label ML model, ``GOOD`` by ImageMarker) are
+        # the same category and would otherwise double the confusion-matrix axis
+        # without any error; the first declared spelling wins (categories, side A,
+        # then side B).  ``Exclude`` is left alone.
+        spelling: dict[str, str] = {}
+        for value in (*self.categories, *self.mapping_a.values(), *self.mapping_b.values()):
+            if value != EXCLUDE and _normalise(value):
+                spelling.setdefault(_normalise(value), value)
+
+        def respell(mapping: Mapping[str, str]) -> dict[str, str]:
+            return {
+                raw: spelling.get(_normalise(target), target) if target != EXCLUDE else target
+                for raw, target in mapping.items()
+            }
+
+        object.__setattr__(self, "mapping_a", respell(self.mapping_a))
+        object.__setattr__(self, "mapping_b", respell(self.mapping_b))
+        if self.categories:
+            object.__setattr__(
+                self,
+                "categories",
+                tuple(
+                    dict.fromkeys(spelling.get(_normalise(item), item) for item in self.categories)
+                ),
+            )
+        if self.positive is not None and _normalise(self.positive) in spelling:
+            object.__setattr__(self, "positive", spelling[_normalise(self.positive)])
         if self.kind == "reference" and not self.categories:
             targets = tuple(
                 dict.fromkeys(
@@ -539,17 +605,39 @@ class SampleData:
     grid: Grid
 
 
+def canonical_spellings(
+    orders: Mapping[str, Sequence[str]],
+) -> dict[str, dict[str, str]]:
+    """``dataset id -> (normalised label -> display spelling)`` from :func:`label_orders`."""
+    return {
+        dataset_id: {_normalise(label): label for label in labels}
+        for dataset_id, labels in orders.items()
+    }
+
+
 def join_aligned(
     profile: ReportProfile,
     datasets: Mapping[str, ParsedDataset],
     alignments: Sequence[AlignmentSpec],
+    spellings: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[SampleData, ...]:
+    """Join aligned sheets coordinate by coordinate.
+
+    Every value is rewritten to one spelling per label: the declared scheme's
+    spelling when ``spellings`` (from :func:`canonical_spellings`) is given — so a
+    ``Good`` predicted by the visual-label ML model and a ``GOOD`` from ImageMarker
+    are the same ``GOOD`` category in every comparison — otherwise the dataset's
+    first-seen spelling.
+    """
     sheets = {
         dataset_id: {sheet.title: sheet for sheet in dataset.sheets}
         for dataset_id, dataset in datasets.items()
     }
     grid = datasets[profile.primary.id].grid
-    canonical = {dataset_id: dataset.canonical_map for dataset_id, dataset in datasets.items()}
+    canonical = {
+        dataset_id: {**dataset.canonical_map, **((spellings or {}).get(dataset_id) or {})}
+        for dataset_id, dataset in datasets.items()
+    }
     samples: list[SampleData] = []
     for alignment in alignments:
         per_dataset: dict[str, dict[tuple[int, int], R2RRecord]] = {}
@@ -817,7 +905,13 @@ def label_orders(
     datasets: Mapping[str, ParsedDataset],
     registry: SchemeRegistry | None = None,
 ) -> dict[str, tuple[str, ...]]:
-    """Raw labels per dataset ordered by the declared scheme, then any extras as seen."""
+    """Labels per dataset in the declared scheme's order and spelling, then extras as seen.
+
+    A registered label is reported in the scheme's spelling (``GOOD`` for a file that
+    says ``Good``), so datasets sharing a scheme share one vocabulary; labels outside
+    the scheme and the reserved ``(missing)`` keep their observed spelling.  Without
+    a scheme the first-seen spelling is kept.
+    """
     registry = registry or load_registry()
     orders: dict[str, tuple[str, ...]] = {}
     for spec in profile.datasets:
@@ -826,10 +920,8 @@ def label_orders(
             orders[spec.id] = observed
             continue
         scheme = registry.scheme(spec.scheme)
-        by_key = {_normalise(label): label for label in observed}
-        ordered = [
-            by_key[_normalise(label)] for label in scheme.labels if _normalise(label) in by_key
-        ]
+        present = {_normalise(label) for label in observed}
+        ordered = [label for label in scheme.labels if _normalise(label) in present]
         extras = [label for label in observed if scheme.canonical(label) is None]
         missing = [label for label in observed if _normalise(label) == _normalise(MISSING)]
         orders[spec.id] = tuple(ordered + extras + missing)
@@ -881,10 +973,14 @@ def evaluate_profile(
     for spec in profile.datasets:
         if datasets[spec.id].grid != profile.primary.grid:
             errors.append(f"dataset {spec.id!r} grid differs from the primary dataset grid")
-    samples = join_aligned(profile, datasets, alignments) if not errors else ()
     registry = registry or load_registry()
     unregistered = unregistered_labels(profile, datasets, registry)
     orders = label_orders(profile, datasets, registry)
+    samples = (
+        join_aligned(profile, datasets, alignments, canonical_spellings(orders))
+        if not errors
+        else ()
+    )
     for dataset_id, labels in unregistered.items():
         errors.append(f"dataset {dataset_id!r} has labels outside its scheme: {', '.join(labels)}")
     comparisons: list[ComparisonResult] = []

@@ -10,16 +10,22 @@ Excel workbook으로 생성하는 한국어 Windows 데스크톱 애플리케이
 기본 화면은 다섯 단계를 순서대로 진행하는 위저드입니다(이전 단계를 수정하면 이후 단계는
 무효화됩니다).
 
-1. **데이터셋** — 파일을 필요한 만큼 추가하고 역할(비교군: 전기 측정 기준 / 전기 ML 예측 /
-   광학 육안 / 광학 VLM(cloud API) / 광학 Local LLM(LM Studio 등 로컬 서버) / 기타), 시트,
-   Inspector 모델 열, 격자(기본 26 × 38)를 지정한 뒤 **불러오기·정렬 검사**를 실행합니다.
+1. **데이터셋** — 파일을 필요한 만큼 추가하고 역할(비교군: 전기 측정 기준 / 전기 ML 예측(전기
+   라벨 학습) / 광학 육안 / 광학 VLM(cloud API) / 광학 Local LLM(LM Studio 등 로컬 서버) /
+   광학 ML 예측(Good/Bad/Open 육안 라벨 학습) / 기타), 시트, Inspector 모델 열, 격자(기본 26 × 38)를
+   지정한 뒤 **불러오기·정렬 검사**를 실행합니다.
    Inspector 내보내기는 모델 열의 공급자로 비교군이 자동 제안됩니다 — `lmstudio:`(또는
    `ollama:`, `llamacpp:`, `vllm:`, `local:`) 열은 **Local LLM**, 그 외는 cloud VLM — 그리고
    같은 파일을 모델별로 여러 번 추가해 cloud 모델과 Local LLM 모델을 각각 비교군으로 둘 수
-   있습니다(기본 제목 `<파일명> [provider:model_id]`). 첫 행이 기준 데이터셋이며, 날짜·kgf·SAM 서명으로 제안된
+   있습니다(기본 제목 `<파일명> [provider:model_id]`). R2R-Machine-Learning 예측 파일은
+   `prob_<class>` 열의 클래스 집합으로 학습 체계를 식별해 비교군을 제안합니다 —
+   `prob_Good / prob_Bad / prob_Open`은 **광학 ML 예측**, `prob_Normal / prob_Open / prob_Short`
+   (또는 E-5 라벨)은 **전기 ML 예측**. 첫 행이 기준 데이터셋이며, 날짜·kgf·SAM 서명으로 제안된
    샘플 정렬을 행마다 또는 **제안 전체 확인**으로 확정합니다.
 2. **라벨 체계** — 데이터셋마다 자동 식별된 체계(`legacy_electrical`, `electrical_e5`,
-   `ml_3class`, `optical_3`, …)를 확인합니다. 체계 밖 라벨이 있으면 진행이 막힙니다.
+   `ml_3class`, `optical_3`, …)를 확인합니다. 체계 밖 라벨이 있으면 진행이 막힙니다. 등록된
+   라벨은 대소문자·공백을 무시해 체계의 철자로 표기·비교됩니다(ML 예측의 `Good`은 육안 라벨과
+   같은 `GOOD`). `Label_Audit` 시트가 원본 철자를 함께 기록합니다.
 3. **비교 정의** — 비교를 0개 이상 추가합니다. *자기 평가*는 A(정답)·B(예측)를 공통 범주로
    매핑(프리셋 또는 직접 지정)하고, *교차 연관*은 원본 라벨 그대로 또는 매핑 후 대칭 지표와
    관심 2×2 셀(예: `E-Invalid × BAD`)을 지정합니다.
@@ -35,7 +41,8 @@ Excel workbook으로 생성하는 한국어 Windows 데스크톱 애플리케이
 | 출처 | 형식 | 식별 |
 |---|---|---|
 | R2R-TXT-Converter 측정 | CSV/XLSX `Name, Row, Node, Status` | 이름·좌표 |
-| R2R-Machine-Learning 예측 | CSV/XLSX `name, row, node, prediction` (+ confidence, prob_*) | 이름·좌표 |
+| R2R-Machine-Learning 예측 (전기 라벨 학습) | CSV/XLSX `name, row, node, prediction` (+ `confidence`, `prob_Normal/prob_Open/prob_Short` 또는 E-5 `prob_*`) | 이름·좌표; 비교군 `electrical_ml` 제안 |
+| R2R-Machine-Learning 예측 (`visual_3class`, 0.6.0+) | 같은 `predictions.csv` 구조에 `prediction` = `Good / Bad / Open`, `prob_Good / prob_Bad / prob_Open` | 이름·좌표; 비교군 `optical_ml`, 체계 `optical_3`(GOOD / BAD / OPEN으로 표기) 제안 |
 | ImageMarker 2.x 육안 라벨 | 측정 XLSX의 `Status` 덮어쓰기본 또는 `name,row,node,label` CSV | 이름·좌표 |
 | Printed-Device-AI-Inspector VLM 라벨 | long/matrix CSV 또는 `.xlsx` (`image_path`, `provider:model_id` 열) | 파일명 `<name>_rgb_<row>_<node>.png` |
 | Printed-Device-AI-Inspector **Local LLM** 라벨 | 같은 내보내기의 `lmstudio:<model>` 열 (Inspector의 LM Studio 공급자) | 동일; 비교군 `optical_vlm_local`로 분류 |
@@ -43,6 +50,9 @@ Excel workbook으로 생성하는 한국어 Windows 데스크톱 애플리케이
 라벨 체계와 매핑 프리셋은 `src/r2r_evaluation_report/schemes/label_schemes.json`에 있으며
 `%APPDATA%\R2R Evaluation Report Generator\label_schemes.json`으로 추가·덮어쓸 수 있습니다.
 지표 정의와 참고문헌은 [docs/METHODOLOGY.md](docs/METHODOLOGY.md)의 "Profile reports" 절을
+참조하세요. 육안 라벨(Good / Bad / Open)로 학습한 ML 모델의 prediction set은 육안·VLM 라벨을
+정답으로 두는 *자기 평가*와 전기 측정과의 *교차 연관*으로 평가합니다 — 같은 문서의 "Visual-label
+ML group and canonical label spelling (v0.7.0)" 절과 [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md)를
 참조하세요.
 
 ---
