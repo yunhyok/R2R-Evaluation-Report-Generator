@@ -39,6 +39,7 @@ CloseApplications=yes
 CloseApplicationsFilter={#AppExeName}
 RestartApplications=no
 UninstallDisplayIcon={app}\{#AppExeName}
+SetupIconFile=..\src\r2r_evaluation_report\assets\icon.ico
 LicenseFile=..\LICENSE
 
 [Languages]

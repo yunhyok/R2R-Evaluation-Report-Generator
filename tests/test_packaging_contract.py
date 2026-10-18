@@ -11,17 +11,31 @@ def test_runtime_dependencies_are_exact_pins() -> None:
         project = tomllib.load(handle)["project"]
     # scipy (and its numpy dependency) was adopted on 2026-09-30 for the association
     # statistics; everything stays exactly pinned for reproducible installers.
+    # Pillow (2026-10-18) renders the transfer-curve grids and lets openpyxl embed them.
     assert project["dependencies"] == [
         "PySide6==6.11.1",
         "openpyxl==3.1.5",
         "numpy==2.5.3",
         "scipy==1.18.1",
+        "Pillow==12.3.0",
     ]
     text = "\n".join(project["dependencies"]).casefold()
     for forbidden in ("pandas", "torch", "scikit", "sklearn", "matplotlib"):
         assert forbidden not in text
     package_data = tomllib.load((ROOT / "pyproject.toml").open("rb"))["tool"]["setuptools"]
     assert package_data["package-data"]["r2r_evaluation_report.schemes"] == ["*.json"]
+    assert package_data["package-data"]["r2r_evaluation_report"] == ["assets/*"]
+
+
+def test_icon_assets_are_bundled_by_spec_and_installer() -> None:
+    assets = ROOT / "src" / "r2r_evaluation_report" / "assets"
+    assert (assets / "icon.ico").is_file() and (assets / "icon.png").is_file()
+    spec = (ROOT / "r2r_evaluation_report.spec").read_text(encoding="utf-8")
+    assert '"r2r_evaluation_report/assets"' in spec and 'icon=str(assets / "icon.ico")' in spec
+    installer = (ROOT / "installer" / "r2r_evaluation_report_generator.iss").read_text(
+        encoding="utf-8"
+    )
+    assert r"SetupIconFile=..\src\r2r_evaluation_report\assets\icon.ico" in installer
 
 
 def test_installer_uses_production_and_disposable_contracts() -> None:

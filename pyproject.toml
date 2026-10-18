@@ -15,6 +15,7 @@ dependencies = [
     "openpyxl==3.1.5",
     "numpy==2.5.3",
     "scipy==1.18.1",
+    "Pillow==12.3.0",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "r2r_evaluation_report.schemes" = ["*.json"]
+"r2r_evaluation_report" = ["assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .resources import apply_application_identity
 from .workbook import derive_color_only_path
 
 ALLOWED_INPUT_SUFFIXES = {".csv", ".xlsx"}
@@ -1098,7 +1099,9 @@ class MainWindow(QMainWindow):
 def run_gui(argv: list[str] | None = None, *, smoke_test: bool = False) -> int:
     """Run the GUI entry point; ``argv`` is retained for test launchers."""
     app = QApplication.instance() or QApplication(argv or [])
+    icon = apply_application_identity(app)
     window = MainWindow()
+    window.setWindowIcon(icon)
     window.show()
     if smoke_test:
         QTimer.singleShot(1500, app.quit)

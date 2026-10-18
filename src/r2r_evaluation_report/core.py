@@ -21,6 +21,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Literal
 
+import numpy as np
 from openpyxl import load_workbook
 
 DatasetKind = Literal["measurement", "prediction", "label"]
@@ -160,6 +161,97 @@ def prediction_classes(headers: Iterable[object]) -> tuple[str, ...]:
     return tuple(probability_columns(headers))
 
 
+_SWEEP_HEADER = re.compile(r"^I_(?P<voltage>[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)V$", re.I)
+
+
+def sweep_columns(headers: Iterable[object]) -> tuple[tuple[str, float], ...]:
+    """``(header key, gate voltage)`` for the current-sweep columns of a converter export.
+
+    R2R-TXT-Converter writes one current column per gate voltage: the
+    ``_merged.csv`` / dataAnalyzerV4 layout names it by the voltage itself
+    (``-20.00000``), the ``_raw.csv`` layout as ``I_<voltage>V``.  The columns count
+    as a sweep only as a set of two or more with a strictly monotonic voltage
+    axis; a lone numeric header or a non-monotonic axis is not a sweep and is
+    ignored.  The returned key is the header spelling used for row lookups.
+    """
+    found: list[tuple[str, float]] = []
+    for header in headers:
+        if header is None or isinstance(header, bool):
+            continue
+        if isinstance(header, int | float):
+            voltage = float(header)
+        else:
+            text = str(header).strip()
+            match = _SWEEP_HEADER.match(text)
+            try:
+                voltage = float(match.group("voltage") if match else text)
+            except ValueError:
+                continue
+        if math.isfinite(voltage):
+            found.append((str(header), voltage))
+    if len(found) < 2:
+        return ()
+    steps = [right - left for (_h, left), (_k, right) in zip(found, found[1:], strict=False)]
+    if not (all(step > 0 for step in steps) or all(step < 0 for step in steps)):
+        return ()
+    return tuple(found)
+
+
+def _sweep_value(value: Any) -> float:
+    """One current cell as a float; anything unreadable is NaN (never an error)."""
+    if value is None or isinstance(value, bool):
+        return math.nan
+    try:
+        number = float(str(value).strip()) if isinstance(value, str) else float(value)
+    except (TypeError, ValueError):
+        return math.nan
+    return number if math.isfinite(number) else math.nan
+
+
+@dataclass(frozen=True, eq=False)
+class SweepTable:
+    """Measured current sweeps of one worksheet, aligned with ``R2RRecord.sweep_index``.
+
+    ``currents`` is a ``(records, points)`` float32 array; a cell that was blank
+    or not numeric in the source is NaN.  The table is shared by every sample
+    sheet split from the worksheet, so a record reaches its trace through
+    ``table.trace(record.sweep_index)``.
+    """
+
+    voltages: tuple[float, ...]
+    currents: Any
+    headers: tuple[str, ...]
+
+    @property
+    def points(self) -> int:
+        return len(self.voltages)
+
+    def trace(self, index: int | None) -> Any | None:
+        """The float32 trace of one record, or ``None`` for a record without a sweep."""
+        if index is None or not 0 <= index < len(self.currents):
+            return None
+        return self.currents[index]
+
+    def same_data(self, other: SweepTable) -> bool:
+        """True when both tables carry the same axis and the same currents (NaN-equal)."""
+        return self.voltages == other.voltages and np.array_equal(
+            self.currents, other.currents, equal_nan=True
+        )
+
+
+def _sweep_table(
+    sweep_headers: Sequence[tuple[str, float]], rows: list[list[float]] | None
+) -> SweepTable | None:
+    if not sweep_headers or rows is None:
+        return None
+    currents = np.asarray(rows, dtype=np.float32).reshape(len(rows), len(sweep_headers))
+    return SweepTable(
+        tuple(voltage for _key, voltage in sweep_headers),
+        currents,
+        tuple(key for key, _voltage in sweep_headers),
+    )
+
+
 _DEFAULT_STATUS_RULES = {
     "pass": "Normal",
     "noactive": "Normal",
@@ -227,6 +319,8 @@ class R2RRecord:
     ``prob_open`` / ``prob_short`` fields above are filled only when those columns
     are exactly the Normal / Open / Short trio of the electrical ML schemes.
     """
+    sweep_index: int | None = None
+    """Row of this record in its worksheet's :class:`SweepTable` (``None``: no sweep columns)."""
 
     @property
     def coordinate(self) -> Coordinate:
@@ -244,6 +338,8 @@ class ParsedSheet:
     records: tuple[R2RRecord, ...]
     header_map: Mapping[str, str]
     sample_name: str | None = None
+    sweeps: SweepTable | None = field(default=None, compare=False, repr=False)
+    """Measured current sweeps of the source worksheet (converter exports); else ``None``."""
 
     @property
     def title(self) -> str:
@@ -811,6 +907,8 @@ def _parse_rows(
     metadata: SourceMetadata,
     grid: Grid = DEFAULT_GRID,
     strict: bool = True,
+    sweep_headers: Sequence[tuple[str, float]] = (),
+    sweep_rows: list[list[float]] | None = None,
 ) -> tuple[R2RRecord, ...]:
     """Parse rows into records.
 
@@ -818,6 +916,10 @@ def _parse_rows(
     without exactly ``grid.size`` unique coordinates.  With ``strict=False`` a
     repeated coordinate starts a new *occurrence* of that Name instead, and size
     checks are deferred to sample selection (:func:`inspect_samples`).
+
+    With ``sweep_headers`` (see :func:`sweep_columns`) and a ``sweep_rows`` list,
+    every record's current sweep is appended to the list (NaN for an unreadable
+    cell) and the record's ``sweep_index`` points at it.
     """
     records: list[R2RRecord] = []
     seen_by_name: dict[str, set[Coordinate]] = defaultdict(set)
@@ -866,6 +968,10 @@ def _parse_rows(
         if class_probabilities is not None and legacy_trio:
             by_class = {_normalise(name): value for name, value in class_probabilities}
             probabilities = (by_class["normal"], by_class["open"], by_class["short"])
+        sweep_index: int | None = None
+        if sweep_headers and sweep_rows is not None:
+            sweep_index = len(sweep_rows)
+            sweep_rows.append([_sweep_value(source_row.get(key)) for key, _v in sweep_headers])
         records.append(
             R2RRecord(
                 name,
@@ -884,6 +990,7 @@ def _parse_rows(
                 row_number,
                 occurrence_by_name[normalised_name],
                 class_probabilities,
+                sweep_index=sweep_index,
             )
         )
     if not seen_by_name:
@@ -947,6 +1054,7 @@ def _sample_sheets(
     grid: Grid = DEFAULT_GRID,
     samples: Mapping[str, str] | None = None,
     allow_partial: bool = False,
+    sweeps: SweepTable | None = None,
 ) -> tuple[ParsedSheet, ...]:
     """Split a worksheet into sample units.
 
@@ -981,7 +1089,7 @@ def _sample_sheets(
                     f"{metadata.path} [{worksheet}]: sample title {title!r} is used twice"
                 )
             seen_titles[_normalise(title)] = title
-        sheets.append(ParsedSheet(kind, metadata, tuple(group), header_map, title))
+        sheets.append(ParsedSheet(kind, metadata, tuple(group), header_map, title, sweeps))
     return tuple(sheets)
 
 
@@ -1079,10 +1187,30 @@ def _parse(
         if not header_map:
             raise DataContractError(f"CSV is missing required {kind} headers")
         metadata = _source_metadata(source, encoding=encoding, worksheet="CSV")
-        records = _parse_rows(enumerate(rows, start=2), header_map, kind, metadata, grid, strict)
+        sweep_headers = () if inspect else sweep_columns(headers)
+        sweep_rows: list[list[float]] | None = [] if sweep_headers else None
+        records = _parse_rows(
+            enumerate(rows, start=2),
+            header_map,
+            kind,
+            metadata,
+            grid,
+            strict,
+            sweep_headers,
+            sweep_rows,
+        )
         if inspect:
             return _candidates(metadata, records, grid)
-        parsed = _sample_sheets(kind, metadata, records, header_map, grid, samples, allow_partial)
+        parsed = _sample_sheets(
+            kind,
+            metadata,
+            records,
+            header_map,
+            grid,
+            samples,
+            allow_partial,
+            _sweep_table(sweep_headers, sweep_rows),
+        )
         if not parsed:
             raise DataContractError(f"{source}: no sample block was selected")
         return ParsedDataset(kind, str(source), parsed, grid)
@@ -1153,12 +1281,25 @@ def _parse(
                 header_map = _header_map(inspector_headers, kind)
                 rows = enumerate(inspector_rows, start=info.header_row + 1)
             assert header_map is not None
-            records = _parse_rows(rows, header_map, kind, metadata, grid, strict)
+            sweep_headers = () if inspect else sweep_columns(header_values)
+            sweep_rows: list[list[float]] | None = [] if sweep_headers else None
+            records = _parse_rows(
+                rows, header_map, kind, metadata, grid, strict, sweep_headers, sweep_rows
+            )
             if inspect:
                 found.extend(_candidates(metadata, records, grid))
                 continue
             parsed.extend(
-                _sample_sheets(kind, metadata, records, header_map, grid, samples, allow_partial)
+                _sample_sheets(
+                    kind,
+                    metadata,
+                    records,
+                    header_map,
+                    grid,
+                    samples,
+                    allow_partial,
+                    _sweep_table(sweep_headers, sweep_rows),
+                )
             )
         if inspect:
             return tuple(found)

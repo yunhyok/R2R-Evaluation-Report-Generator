@@ -30,6 +30,31 @@ _VISUAL_PROBABILITIES = {
     "Bad": (0.05, 0.9, 0.05),
     "Open": (0.05, 0.05, 0.9),
 }
+SYNTHETIC_SWEEP_VOLTAGES = tuple(float(v) for v in range(-20, 21, 2))
+"""Gate voltages of the synthetic measurement sweep (21 points, -20 V .. +20 V)."""
+
+
+def _synthetic_sweep(status: str, voltages) -> tuple[str, ...]:
+    """A deterministic p-type transfer curve (or a flat/open/short trace) per legacy status."""
+    import math
+
+    key = status.casefold()
+    values = []
+    for voltage in voltages:
+        if key == "pass":
+            current = 5e-9 + 1e-6 / (1.0 + math.exp((voltage + 5.0) / 2.0))
+        elif key == "no active":
+            current = 2e-8 + 1e-8 / (1.0 + math.exp((voltage + 5.0) / 2.0))
+        elif key == "no gate effect":
+            current = 3e-7
+        elif key == "open":
+            current = 1e-11
+        elif key == "short":
+            current = 1e-5
+        else:  # None: negative noise-level current, the converter's cond1 case
+            current = -2e-9
+        values.append(f"{current:.6e}")
+    return tuple(values)
 
 
 def _write_synthetic_visual_predictions(path: Path, joined) -> None:
@@ -104,10 +129,14 @@ def _write_synthetic_profile(directory: Path) -> Path:
         path = directory / f"synthetic-{kind}.csv"
         with path.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["Name", "Row", "Node", column])
+            # The measurement file carries the converter's sweep columns too, so the
+            # self-test renders (and the packaged build bundles) the transfer-curve grid.
+            sweep = SYNTHETIC_SWEEP_VOLTAGES if kind == "measurement" else ()
+            writer.writerow(["Name", "Row", "Node", column, *(f"{v:.5f}" for v in sweep)])
             for row in sheet.joined:
                 record = getattr(row, kind)
-                writer.writerow([record.name, record.row, record.node, record.value])
+                currents = _synthetic_sweep(record.value, sweep) if sweep else ()
+                writer.writerow([record.name, record.row, record.node, record.value, *currents])
         paths[kind] = path
     visual_path = directory / "synthetic-visual-ml.csv"
     _write_synthetic_visual_predictions(visual_path, sheet.joined)
