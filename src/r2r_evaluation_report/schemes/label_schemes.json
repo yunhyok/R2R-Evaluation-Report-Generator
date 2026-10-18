@@ -17,9 +17,9 @@
       "description": "R2R-Machine-Learning three-class output."
     },
     "optical_3": {
-      "title": "Optical (GOOD / BAD / OPEN)",
+      "title": "Optical / visual verdict (GOOD / BAD / OPEN)",
       "labels": ["GOOD", "BAD", "OPEN"],
-      "description": "Human (ImageMarker 2.x) or VLM (Printed-Device-AI-Inspector) visual labels."
+      "description": "Visual-inspection vocabulary: human (ImageMarker 2.x) labels, VLM / Local LLM (Printed-Device-AI-Inspector) verdicts, and R2R-Machine-Learning visual_3class predictions (Good / Bad / Open). Spelling is case-insensitive; reports use GOOD / BAD / OPEN."
     },
     "binary_pass_fail": {
       "title": "Binary (Pass / Fail)",

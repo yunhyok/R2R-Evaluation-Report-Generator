@@ -183,6 +183,50 @@ neither model is a ground truth, κ (Cohen 1960; Landis & Koch 1977 benchmarks) 
 is the headline there. Pre-specify which cells and thresholds decide the comparison before the data
 arrive — the report records the profile so the pre-specification is auditable.
 
+### Visual-label ML group and canonical label spelling (v0.7.0)
+
+R2R-Machine-Learning 0.6.0 adds the label scheme `visual_3class`: a model trained on the
+visual-inspection verdicts Good / Bad / Open instead of on electrical status, whose
+`predictions.csv` carries `prob_Good`, `prob_Bad` and `prob_Open`. Such a prediction set has the
+role **`optical_ml`** ("광학 ML 예측 (Good/Bad/Open 육안 라벨 학습)"), a comparison group of its own
+beside `electrical_ml`: the two models answer different questions (what the electrical measurement
+would say vs what a visual inspector would say) and must not be pooled.
+
+* **Vocabulary.** The predictions belong to the `optical_3` scheme (GOOD / BAD / OPEN) shared with
+  the ImageMarker and Inspector labels; no new scheme is introduced. The `optical_to_binary` and
+  `optical_to_3class` presets apply unchanged. `optical_to_3class` maps BAD → Short *by assumption*
+  (a visual defect other than an open is not an electrical short); the association comparison on raw
+  labels is the assumption-free view against electrical status.
+* **Which comparison.** The reference for a visual-label model is the visual label set it was
+  trained from: human (or VLM) labels × `optical_ml` is a *reference* comparison (confusion matrix,
+  accuracy with Wilson CI, macro F1, Cohen's κ, MCC, majority baseline) with the identity mapping on
+  both sides. Electrical status × `optical_ml` is an *association* (Cramér's V with Bergsma
+  correction, Theil's U, adjusted residuals, selected 2 × 2 odds ratios), exactly as for the human
+  and VLM groups. Electrical ML × visual ML agreement is an association whose κ row is the
+  inter-model agreement; neither model is truth for the other.
+* **Group suggestion.** Only R2R-Machine-Learning exports carry `prob_<class>` columns, and the
+  class set names the scheme the model was trained on. The wizard pre-selects `optical_ml` for
+  {Good, Bad, Open}, `electrical_ml` for a subset of {Normal, Open, Short, E-Normal, E-NoActive,
+  E-Open, E-Short, E-Invalid}, and nothing for any other (custom) class set. Inspector exports keep
+  their provider-based suggestion. The role is recorded in the profile and the README sheet.
+* **Probability contract.** Probability columns are read as `prob_<class>` for any class set. Within
+  a row they must be supplied together, lie in [0, 1] and (for two or more classes) sum to 1 within
+  1e-5 — the contract the Normal/Open/Short trio always had. `R2RRecord.class_probabilities` holds
+  the per-class values in column order; the dedicated `prob_normal/prob_open/prob_short` fields are
+  filled only when the columns are exactly that trio, so the legacy comparison workbook is unchanged.
+
+**Canonical spelling.** Label matching has always ignored case, spacing and punctuation
+(NFKC → casefold → alphanumerics). From v0.7.0 a dataset with a declared scheme is also *reported*
+in the scheme's spelling: `Good` from the ML export and `GOOD` from ImageMarker are the same `GOOD`
+on maps, in `Label_Audit`, in `Joined_Data` and on every comparison axis; labels outside the scheme
+and the reserved `(missing)` keep their observed spelling. `Label_Audit` lists the observed
+spellings next to each label so the source is still auditable. Inside one comparison, mapping
+targets and categories that differ only in case or spacing are one category, spelled as first
+declared (categories, then side A, then side B); `Exclude` is never respelled. Before this rule an
+identity-mapped reference comparison of `GOOD/BAD/OPEN` against `Good/Bad/Open` built a 6 × 6
+confusion matrix with accuracy 0 and no blocking error — the kind of silent inference the profile
+report is designed to refuse.
+
 ### Sample blocks, repeated Names and missing verdicts (v0.5.1)
 
 Within one worksheet a Name is split into *occurrences*: a coordinate that repeats starts a new

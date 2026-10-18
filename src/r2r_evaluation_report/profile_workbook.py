@@ -256,6 +256,25 @@ def _dataset_title(result: ProfileResult, dataset_id: str) -> str:
     return result.profile.dataset(dataset_id).label
 
 
+def _label_counts(result: ProfileResult, dataset_id: str) -> tuple[Counter, int]:
+    """Record count per reported label (scheme spelling; case-insensitive match) and the total."""
+    dataset = result.datasets[dataset_id]
+    by_key: Counter = Counter(
+        _normalise(record.value) for sheet in dataset.sheets for record in sheet.records
+    )
+    counts = Counter({label: by_key[_normalise(label)] for label in result.labels(dataset_id)})
+    return counts, sum(by_key.values())
+
+
+def _observed_spellings(result: ProfileResult, dataset_id: str) -> dict[str, tuple[str, ...]]:
+    """Normalised label -> distinct spellings found in the source, in first-seen order."""
+    seen: dict[str, dict[str, None]] = {}
+    for sheet in result.datasets[dataset_id].sheets:
+        for record in sheet.records:
+            seen.setdefault(_normalise(record.value), {}).setdefault(record.value, None)
+    return {key: tuple(spellings) for key, spellings in seen.items()}
+
+
 def _provider_text(spec: DatasetSpec) -> str:
     """``lmstudio (local)`` / ``gemini (cloud)`` / '' for non-Inspector datasets."""
     provider = spec.provider
@@ -283,7 +302,7 @@ def _comparison_groups(ws, row: int, result: ProfileResult) -> int:
             1
             for sheet in dataset.sheets
             for record in sheet.records
-            if dataset.canonical(record.value) != MISSING
+            if _normalise(record.value) != _normalise(MISSING)
         )
         values = (
             role_title(spec.role),
@@ -306,6 +325,17 @@ def _comparison_groups(ws, row: int, result: ProfileResult) -> int:
             "(Inspector provider "
             + ", ".join(sorted({spec.provider or "local" for spec in local}))
             + "); scored with the same metrics as the cloud VLM group.",
+        )
+        row += 1
+    if any(spec.role == "optical_ml" for spec in result.profile.datasets):
+        ws.cell(
+            row,
+            1,
+            "Visual-label ML group: R2R-Machine-Learning model trained on visual-inspection "
+            "labels (Good / Bad / Open, scheme optical_3), not on electrical status. Its "
+            "reference is the human or VLM label set that defined those classes (reference "
+            "comparison); electrical status is an association for it. Good / Bad / Open "
+            "spellings are reported as GOOD / BAD / OPEN.",
         )
         row += 1
     return row + 1
@@ -437,32 +467,45 @@ def _readme(wb: Workbook, result: ProfileResult, *, show_map_codes: bool) -> Non
 
 def _label_audit(wb: Workbook, result: ProfileResult) -> None:
     ws = wb.create_sheet("Label_Audit")
-    _title(ws, "Label audit — raw label distribution per dataset", "H")
-    headers = ("Dataset", "Scheme", "Raw label", "In scheme", "Count", "Share")
+    _title(ws, "Label audit — label distribution per dataset", "H")
+    headers = (
+        "Dataset",
+        "Scheme",
+        "Label",
+        "Observed spellings",
+        "In scheme",
+        "Count",
+        "Share",
+    )
     for col, header in enumerate(headers, 1):
         ws.cell(3, col, header)
     _style_header_row(ws, 3, 1, len(headers))
     row = 4
     for spec in result.profile.datasets:
-        dataset = result.datasets[spec.id]
-        counts = Counter(
-            dataset.canonical(record.value) for sheet in dataset.sheets for record in sheet.records
-        )
-        total = sum(counts.values())
+        counts, total = _label_counts(result, spec.id)
+        spellings = _observed_spellings(result, spec.id)
         extra = {_normalise(x) for x in result.unregistered.get(spec.id, ())}
         for label in result.labels(spec.id):
             ws.cell(row, 1, spec.label)
             ws.cell(row, 2, spec.scheme or "(unregistered)")
             ws.cell(row, 3, label)
-            ws.cell(row, 4, "no" if _normalise(label) in extra else "yes")
-            ws.cell(row, 5, counts[label])
-            ws.cell(row, 6, counts[label] / total if total else None).number_format = "0.00%"
+            ws.cell(row, 4, ", ".join(spellings.get(_normalise(label), (label,))))
+            ws.cell(row, 5, "no" if _normalise(label) in extra else "yes")
+            ws.cell(row, 6, counts[label])
+            ws.cell(row, 7, counts[label] / total if total else None).number_format = "0.00%"
             row += 1
+    ws.cell(
+        row + 1,
+        1,
+        "Label: the declared scheme's spelling (first-seen spelling when unregistered). "
+        "Observed spellings: how the source file writes it; matching ignores case and spacing.",
+    )
     ws.column_dimensions["A"].width = 24
     ws.column_dimensions["B"].width = 22
     ws.column_dimensions["C"].width = 22
+    ws.column_dimensions["D"].width = 26
     ws.freeze_panes = "A4"
-    ws.auto_filter.ref = f"A3:F{max(row - 1, 4)}"
+    ws.auto_filter.ref = f"A3:G{max(row - 1, 4)}"
 
 
 def _alignment(wb: Workbook, result: ProfileResult) -> None:
@@ -1032,11 +1075,7 @@ def _summary(wb: Workbook, result: ProfileResult) -> None:
     row = dist_header + 1
     first_dataset_rows: tuple[int, int] | None = None
     for spec in result.profile.datasets:
-        dataset = result.datasets[spec.id]
-        counts = Counter(
-            dataset.canonical(record.value) for sheet in dataset.sheets for record in sheet.records
-        )
-        total = sum(counts.values())
+        counts, total = _label_counts(result, spec.id)
         start = row
         for label in result.labels(spec.id):
             ws.cell(row, 1, spec.label)

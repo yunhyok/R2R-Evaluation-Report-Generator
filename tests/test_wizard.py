@@ -408,3 +408,150 @@ def test_threaded_preflight_chains_inspection_and_load(qtbot, files, tmp_path: P
     qtbot.waitUntil(lambda: window._last_outputs is not None, timeout=180_000)
     qtbot.waitUntil(lambda: window._thread is None, timeout=10_000)
     assert output.exists() and output.with_suffix(".profile.json").exists()
+
+
+def _ml_export(path: Path, name: str, classes: tuple[str, str, str], verdicts) -> Path:
+    """R2R-Machine-Learning predictions.csv with one ``prob_<class>`` column per class."""
+    rows = []
+    for index, (row, node) in enumerate(GRID):
+        verdict = verdicts(index)
+        rows.append(
+            {
+                "image_path": f"C:/slices/{name}_rgb_{row}_{node}.png",
+                "name": name,
+                "row": row,
+                "node": node,
+                "sha256": "abc",
+                "run_date": "2026-10-17",
+                "source_id": "slices",
+                "prediction": verdict,
+                "confidence": 0.9,
+                "review_required": "false",
+                **{f"prob_{label}": 0.9 if label == verdict else 0.05 for label in classes},
+            }
+        )
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def test_visual_label_ml_export_is_its_own_comparison_group(qtbot, files, tmp_path: Path) -> None:
+    """A Good/Bad/Open prediction set is pre-sorted into the visual-label ML group and
+    compared against the human labels on one GOOD/BAD/OPEN axis."""
+    visual_export = _ml_export(
+        tmp_path / "predictions.csv",
+        "20260731_sam1_slices",
+        ("Good", "Bad", "Open"),
+        lambda index: ("Good", "Bad", "Open")[index % 3] if index % 7 else "Good",
+    )
+    electrical_export = _ml_export(
+        tmp_path / "electrical.csv",
+        "20260731_7kgf_sam1",
+        ("Normal", "Open", "Short"),
+        lambda index: ("Normal", "Open", "Short")[index % 3],
+    )
+    info = wizard_backend.inspect_source(visual_export)
+    assert info.prediction_classes == ("Good", "Bad", "Open")
+    assert info.is_ml_prediction and not info.is_inspector
+    assert wizard_backend.inspect_source(electrical_export).prediction_classes == (
+        "Normal",
+        "Open",
+        "Short",
+    )
+    assert wizard_backend.inspect_source(files["ml"]).prediction_classes == ()
+    # The same export saved as .xlsx is recognised through its header row.
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    with visual_export.open(encoding="utf-8-sig", newline="") as handle:
+        for record in csv.reader(handle):
+            sheet.append(record)
+    xlsx = tmp_path / "predictions.xlsx"
+    workbook.save(xlsx)
+    assert wizard_backend.inspect_source(xlsx).prediction_classes == ("Good", "Bad", "Open")
+
+    registry = schemes.load_registry(user_path="/nonexistent")
+    window = WizardWindow(test_mode=True, registry=registry)
+    qtbot.addWidget(window)
+    elec = window.add_dataset(str(files["elec"]), role="electrical_gt", title="Electrical")
+    human = window.add_dataset(str(files["human"]), role="optical_human", title="Human")
+    visual = window.add_dataset(str(visual_export))  # no role given
+    electrical_ml = window.add_dataset(str(electrical_export))
+    specs = {spec.id: spec for spec in window.dataset_specs()}
+    assert specs[visual].role == "optical_ml" and specs[visual].title == "predictions"
+    assert specs[electrical_ml].role == "electrical_ml"
+    assert specs[visual].group_label == profile.role_title("optical_ml")
+    window.dataset_table.selectRow(3)
+    window._remove_dataset()
+    assert [spec.id for spec in window.dataset_specs()] == [elec, human, visual]
+
+    window.run_preflight()
+    assert window.load is not None
+    assert window.load.suggested_schemes[visual] == "optical_3"
+    assert window.load.raw_labels[visual] == ("Good", "Bad", "Open")
+    window._confirm_all()
+    assert len(window.confirmed_alignments()) == 2
+    window._next()
+    assert {spec.id: spec.scheme for spec in window.dataset_specs()}[visual] == "optical_3"
+    window._next()
+
+    # The comparison dialog offers the scheme spelling for the ML side, so the default
+    # identity mapping human (A) vs visual ML (B) yields one GOOD/BAD/OPEN axis.
+    specs = window.dataset_specs()
+    ids = [spec.id for spec in specs]
+    dialog = ComparisonDialog(window, specs, window._labels_by_dataset(), registry)
+    qtbot.addWidget(dialog)
+    dialog.a_box.setCurrentIndex(ids.index(human))
+    dialog.b_box.setCurrentIndex(ids.index(visual))
+    dialog.kind_box.setCurrentIndex(0)
+    dialog.title_edit.setText("Human vs visual ML")
+    reference = dialog.build()
+    assert reference.kind == "reference"
+    assert reference.mapping_b == {"GOOD": "GOOD", "BAD": "BAD", "OPEN": "OPEN"}
+    assert reference.categories == ("GOOD", "BAD", "OPEN")
+    assert not wizard_backend.validate_comparison(
+        reference, window._labels_by_dataset()[human], window._labels_by_dataset()[visual]
+    )
+    window.add_comparison(reference)
+    window.add_comparison(
+        profile.ComparisonSpec(
+            "elec_x_visual",
+            "association",
+            elec,
+            visual,
+            "Electrical vs visual ML",
+            cells=(profile.CellSpec("E-Short x BAD", ("E-Short",), ("BAD",)),),
+        )
+    )
+    assert window.comparison_table.item(0, 5).text() == "확인"
+    window._next()
+    output = tmp_path / "visual.xlsx"
+    window.output_edit.setText(str(output))
+    window._refresh_next()
+    window._next()
+    assert "Human vs visual ML" in window.summary_view.toPlainText()
+    window.run_generate()
+    assert window._last_outputs is not None, window.status_label.text()
+
+    wb = load_workbook(output)
+    verify_profile_workbook(wb)
+    readme = [[c.value for c in r] for r in wb["README"].iter_rows()]
+    header = next(r for r in readme if r[0] == "Id" and "Comparison group" in r)
+    visual_row = next(r for r in readme if r[0] == visual)
+    assert visual_row[header.index("Comparison group")] == profile.role_title("optical_ml")
+    assert visual_row[header.index("Role key")] == "optical_ml"
+    assert visual_row[header.index("Scheme")] == "optical_3"
+    summary = [[c.value for c in r] for r in wb["Overall Summary"].iter_rows()]
+    assert any(isinstance(r[0], str) and r[0].startswith("Visual-label ML group:") for r in summary)
+    audit = [[c.value for c in r] for r in wb["Label_Audit"].iter_rows(min_row=3)]
+    columns = audit[0]
+    good = next(
+        r for r in audit[1:] if r[0] == "predictions" and r[columns.index("Label")] == "GOOD"
+    )
+    assert good[columns.index("Observed spellings")] == "Good"
+    saved = profile.ReportProfile.load(output.with_suffix(".profile.json"))
+    assert saved.dataset(visual).role == "optical_ml"
+    assert saved.comparisons[0].categories == ("GOOD", "BAD", "OPEN")
