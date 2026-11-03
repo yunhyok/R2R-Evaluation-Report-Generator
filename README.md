@@ -202,3 +202,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify_installed_actual_ui.ps
 실제 연구 CSV/XLSX, 생성 workbook, `build/`, `dist/`, installer는 source repository에
 commit하지 않습니다. Windows 코드 서명이 없는 installer는 SmartScreen 경고가 발생할
 수 있으며, 이 경고는 기능 검증 실패와 별도로 취급합니다.
+
+## Windows installation paths
+
+New installations default to **Program Files** using Inno Setup's `{autopf}`
+variable. The destination page is shown for both fresh installs and upgrades;
+select another folder or drive there. All-users installation requires administrator
+rights. Existing per-user installations retain their original mode and previous
+folder; the destination remains editable. `/ALLUSERS` and `/CURRENTUSER` explicitly
+select the mode for unattended installation; `/DIR="D:\Apps\Application"` selects
+a destination. Changing install scope does not remove the previous installation.
+
+Keep projects, models, exports and settings in your existing user data folders.
+Changing the destination does not move them. Copy any personal files stored beside
+the old executable before removing that old installation using its own uninstaller.
+The installer does not execute an installed application in administrative mode.
+Packaged application checks and installation lifecycle checks run separately in CI.

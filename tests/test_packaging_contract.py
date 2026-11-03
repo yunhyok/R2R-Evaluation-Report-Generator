@@ -44,8 +44,8 @@ def test_installer_uses_production_and_disposable_contracts() -> None:
     )
     assert "{BFA7031A-FBC3-4878-8893-9B83A28587DA}" in installer
     assert "{2E42973D-7A33-4CF3-91FD-7A4C62ACCC4F}" in installer
-    assert "PrivilegesRequired=lowest" in installer
-    assert r"{localappdata}\Programs\R2R Evaluation Report Generator" in installer
+    assert "PrivilegesRequired=admin" in installer
+    assert r"{autopf}\R2R Evaluation Report Generator" in installer
 
 
 def test_pyinstaller_uses_absolute_import_launcher() -> None:

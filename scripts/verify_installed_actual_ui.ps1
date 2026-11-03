@@ -153,7 +153,7 @@ $appExe = Join-Path $resolvedInstallRoot $appExeName
 $uninstaller = Join-Path $resolvedInstallRoot 'unins000.exe'
 $synthetic = Join-Path $resolvedInstallRoot 'installed-ui-synthetic.xlsx'
 $directoryArgument = '/DIR="' + $resolvedInstallRoot + '"'
-$installArgs = @('/SP-', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', $directoryArgument)
+$installArgs = @('/SP-', '/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', $directoryArgument)
 $installed = $false
 $uninstalled = $false
 
@@ -195,7 +195,7 @@ try {
         Remove-Item -LiteralPath $synthetic -Force
     }
     Stop-InstalledApp $appExe
-    Invoke-ProcessWithTimeout $uninstaller @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') 'Hidden uninstall'
+    Invoke-ProcessWithTimeout $uninstaller @('/CURRENTUSER', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') 'Hidden uninstall'
     Start-Sleep -Seconds 2
     if (Test-Path -LiteralPath $appExe) { throw 'Uninstall left the application executable.' }
     if ($uninstallKeys | Where-Object { Test-Path -LiteralPath $_ }) {

@@ -63,6 +63,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Installed GUI smoke test failed.' }
           $uninstall = Join-Path $root 'unins000.exe'
           Start-Process -FilePath $uninstall -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait
+      - name: Verify production installer paths and actual previous release upgrade
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/verify_install_paths.ps1 -Installer 'dist/installer/R2R-Evaluation-Report-Generator-0.9.1-setup.exe'
+
       - name: Collect release notes for this version
         run: python scripts/release_notes.py
       - uses: actions/upload-artifact@v4
@@ -83,9 +89,9 @@ jobs:
           $existing = gh release view $tag --json tagName 2>$null
           if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists." }
           if ("${{ github.ref }}" -like 'refs/tags/*') {
-            gh release create $tag $setup "$setup.sha256" --title "R2R Evaluation Report Generator $tag" --notes-file release_notes.md --verify-tag
+            gh release create $tag $setup "$setup.sha256" "$setup.verification.json" --title "R2R Evaluation Report Generator $tag" --notes-file release_notes.md --verify-tag
           } else {
             # workflow_dispatch: the release creates the tag on the dispatched commit.
-            gh release create $tag $setup "$setup.sha256" --title "R2R Evaluation Report Generator $tag" --notes-file release_notes.md --target "${{ github.sha }}"
+            gh release create $tag $setup "$setup.sha256" "$setup.verification.json" --title "R2R Evaluation Report Generator $tag" --notes-file release_notes.md --target "${{ github.sha }}"
           }
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
