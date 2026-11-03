@@ -67,7 +67,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/verify_install_paths.ps1 -Installer 'dist/installer/R2R-Evaluation-Report-Generator-0.9.1-setup.exe'
+        run: ./scripts/verify_install_paths.ps1 -Installer 'dist/installer/R2R-Evaluation-Report-Generator-0.9.2-setup.exe'
 
       - name: Collect release notes for this version
         run: python scripts/release_notes.py

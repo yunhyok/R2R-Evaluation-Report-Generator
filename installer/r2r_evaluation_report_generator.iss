@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.9.1"
+  #define AppVersion "0.9.2"
 #endif
 #define AppPublisher "Yunhyok"
 #define AppExeName "R2REvaluationReportGenerator.exe"
@@ -60,4 +60,4 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Name: "desktopicon"; Description: "바탕 화면 바로 가기 만들기"; GroupDescription: "추가 아이콘:"
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "{#AppName} 실행"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: not IsAdminInstallMode
+Filename: "{app}\{#AppExeName}"; Description: "{#AppName} 실행"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: not IsAdmin
